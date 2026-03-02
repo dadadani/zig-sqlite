@@ -3,7 +3,7 @@ const builtin = @import("builtin");
 const build_options = @import("build_options");
 const debug = std.debug;
 const heap = std.heap;
-const io = std.io;
+const io = std.Io;
 const mem = std.mem;
 const testing = std.testing;
 
@@ -132,11 +132,100 @@ pub const Blob = struct {
         }
     }
 
-    pub const Reader = io.GenericReader(*Self, errors.Error, read);
+    pub const Reader = struct {
+        interface: io.Reader,
+        blob: *Self,
 
-    /// reader returns a io.Reader.
+        pub fn init(blob: *Self) Reader {
+            return .{
+                .blob = blob,
+                .interface = .{
+                    .vtable = &.{
+                        .stream = stream,
+                        .readVec = readVec,
+                    },
+                    .buffer = &.{},
+                    .seek = 0,
+                    .end = 0,
+                },
+            };
+        }
+
+        /// Reads all remaining bytes up to `limit`.
+        pub fn allocRemaining(self: *Reader, allocator: mem.Allocator, limit: io.Limit) ![]u8 {
+            return self.interface.allocRemaining(allocator, limit);
+        }
+
+        pub fn readAlloc(self: *Reader, allocator: mem.Allocator, len: usize) ![]u8 {
+            return self.interface.readAlloc(allocator, len);
+        }
+
+        pub fn readSliceAll(self: *Reader, buffer: []u8) !void {
+            return self.interface.readSliceAll(buffer);
+        }
+
+        pub fn readSliceShort(self: *Reader, buffer: []u8) !usize {
+            return self.interface.readSliceShort(buffer);
+        }
+
+        fn stream(r: *io.Reader, w: *io.Writer, limit: io.Limit) io.Reader.StreamError!usize {
+            const this: *Reader = @alignCast(@fieldParentPtr("interface", r));
+            const remaining = @as(usize, @intCast(this.blob.size)) - @as(usize, @intCast(this.blob.offset));
+            if (remaining == 0) return error.EndOfStream;
+
+            const max = switch (limit) {
+                .unlimited => remaining,
+                else => @min(@intFromEnum(limit), remaining),
+            };
+            if (max == 0) return error.EndOfStream;
+
+            var buf: [4096]u8 = undefined;
+            const to_read = @min(buf.len, max);
+            const result = c.sqlite3_blob_read(
+                this.blob.handle,
+                buf[0..to_read].ptr,
+                @intCast(to_read),
+                this.blob.offset,
+            );
+            if (result != c.SQLITE_OK) return error.ReadFailed;
+
+            this.blob.offset += @intCast(to_read);
+            try w.writeAll(buf[0..to_read]);
+            return to_read;
+        }
+
+        fn readVec(r: *io.Reader, data: [][]u8) io.Reader.Error!usize {
+            const this: *Reader = @alignCast(@fieldParentPtr("interface", r));
+            const remaining = @as(usize, @intCast(this.blob.size)) - @as(usize, @intCast(this.blob.offset));
+            if (remaining == 0) return error.EndOfStream;
+
+            if (data.len == 0) return 0;
+
+            var dest: []u8 = &.{};
+            for (data) |buf| {
+                if (buf.len == 0) continue;
+                dest = buf;
+                break;
+            }
+            if (dest.len == 0) return 0;
+
+            const to_read = @min(dest.len, remaining);
+            const result = c.sqlite3_blob_read(
+                this.blob.handle,
+                dest.ptr,
+                @intCast(to_read),
+                this.blob.offset,
+            );
+            if (result != c.SQLITE_OK) return error.ReadFailed;
+
+            this.blob.offset += @intCast(to_read);
+            return to_read;
+        }
+    };
+
+    /// reader returns a std.Io.Reader wrapper.
     pub fn reader(self: *Self) Reader {
-        return .{ .context = self };
+        return Reader.init(self);
     }
 
     fn read(self: *Self, buffer: []u8) Error!usize {
@@ -164,11 +253,75 @@ pub const Blob = struct {
         return tmp_buffer.len;
     }
 
-    pub const Writer = io.GenericWriter(*Self, Error, write);
+    pub const Writer = struct {
+        interface: io.Writer,
+        blob: *Self,
 
-    /// writer returns a io.Writer.
+        pub fn init(blob: *Self) Writer {
+            return .{
+                .blob = blob,
+                .interface = .{
+                    .vtable = &.{
+                        .drain = drain,
+                    },
+                    .buffer = &.{},
+                    .end = 0,
+                },
+            };
+        }
+
+        pub fn writeAll(self: *Writer, data: []const u8) !void {
+            return self.interface.writeAll(data);
+        }
+
+        pub fn write(self: *Writer, data: []const u8) !usize {
+            return self.interface.write(data);
+        }
+
+        pub fn writeByte(self: *Writer, byte: u8) !void {
+            return self.interface.writeByte(byte);
+        }
+
+        fn drain(w: *io.Writer, data: []const []const u8, splat: usize) io.Writer.Error!usize {
+            const this: *Writer = @alignCast(@fieldParentPtr("interface", w));
+            if (data.len == 0) return 0;
+
+            var written: usize = 0;
+            for (data[0 .. data.len - 1]) |chunk| {
+                if (chunk.len == 0) continue;
+                const result = c.sqlite3_blob_write(
+                    this.blob.handle,
+                    chunk.ptr,
+                    @intCast(chunk.len),
+                    this.blob.offset,
+                );
+                if (result != c.SQLITE_OK) return error.WriteFailed;
+                this.blob.offset += @intCast(chunk.len);
+                written += chunk.len;
+            }
+
+            const pattern = data[data.len - 1];
+            if (pattern.len != 0 and splat != 0) {
+                for (0..splat) |_| {
+                    const result = c.sqlite3_blob_write(
+                        this.blob.handle,
+                        pattern.ptr,
+                        @intCast(pattern.len),
+                        this.blob.offset,
+                    );
+                    if (result != c.SQLITE_OK) return error.WriteFailed;
+                    this.blob.offset += @intCast(pattern.len);
+                    written += pattern.len;
+                }
+            }
+
+            return written;
+        }
+    };
+
+    /// writer returns a std.Io.Writer wrapper.
     pub fn writer(self: *Self) Writer {
-        return .{ .context = self };
+        return Writer.init(self);
     }
 
     fn write(self: *Self, data: []const u8) Error!usize {
@@ -571,7 +724,7 @@ pub const Db = struct {
 
     /// openBlob opens a blob for incremental i/o.
     ///
-    /// Incremental i/o enables writing and reading data using a std.io.Writer and std.io.Reader:
+    /// Incremental i/o enables writing and reading data using a std.Io.Writer and std.Io.Reader:
     ///  * the writer type wraps sqlite3_blob_write, see https://sqlite.org/c3ref/blob_write.html
     ///  * the reader type wraps sqlite3_blob_read, see https://sqlite.org/c3ref/blob_read.html
     ///
@@ -579,19 +732,19 @@ pub const Db = struct {
     /// * the blob must exist before writing; you must use INSERT to create one first (either with data or using a placeholder with ZeroBlob).
     /// * the blob is not extensible, if you want to change the blob size you must use an UPDATE statement.
     ///
-    /// You can get a std.io.Writer to write data to the blob:
+    /// You can get a std.Io.Writer to write data to the blob:
     ///
     ///     var blob = try db.openBlob(.main, "mytable", "mycolumn", 1, .{ .write = true });
     ///     var blob_writer = blob.writer();
     ///
     ///     try blob_writer.writeAll(my_data);
     ///
-    /// You can get a std.io.Reader to read the blob data:
+    /// You can get a std.Io.Reader to read the blob data:
     ///
     ///     var blob = try db.openBlob(.main, "mytable", "mycolumn", 1, .{});
     ///     var blob_reader = blob.reader();
     ///
-    ///     const data = try blob_reader.readAlloc(allocator);
+    ///     const data = try blob_reader.allocRemaining(allocator, .unlimited);
     ///
     /// See https://sqlite.org/c3ref/blob_open.html for more details on incremental i/o.
     ///
@@ -1470,7 +1623,8 @@ pub fn Iterator(comptime Type: type) type {
                     },
                     inline .@"struct", .@"union" => |TI| {
                         if (TI.layout == .@"packed" and !@hasField(FieldType, "readField")) {
-                            const Backing = @Type(.{ .int = .{ .signedness = .unsigned, .bits = @bitSizeOf(FieldType) } });
+                            //const Backing = @Type(.{ .int = .{ .signedness = .unsigned, .bits = @bitSizeOf(FieldType) } });
+                            const Backing = @Int(.signed, @bitSizeOf(FieldType));
                             return @bitCast(self.readInt(Backing, i));
                         }
 
@@ -1701,7 +1855,8 @@ pub const DynamicStatement = struct {
                 },
                 .@"union" => |info| {
                     if (info.layout == .@"packed") {
-                        const Backing = @Type(.{ .int = .{ .signedness = .unsigned, .bits = @bitSizeOf(FieldType) } });
+                        //const Backing = @Type(.{ .int = .{ .signedness = .unsigned, .bits = @bitSizeOf(FieldType) } });
+                        const Backing = @Int(.signed, @bitSizeOf(FieldType));
                         try self.bindField(Backing, options, field_name, i, @as(Backing, @bitCast(field)));
                         return;
                     }
@@ -3127,7 +3282,7 @@ test "sqlite: blob open, reopen" {
         blob.reset();
 
         var blob_reader = blob.reader();
-        const data = try blob_reader.readAllAlloc(allocator, 8192);
+        const data = try blob_reader.allocRemaining(allocator, .limited(8192));
 
         try testing.expectEqualSlices(u8, blob_data1 ** 2, data);
     }
@@ -3144,7 +3299,7 @@ test "sqlite: blob open, reopen" {
         blob.reset();
 
         var blob_reader = blob.reader();
-        const data = try blob_reader.readAllAlloc(allocator, 8192);
+        const data = try blob_reader.allocRemaining(allocator, .limited(8192));
 
         try testing.expectEqualSlices(u8, blob_data2 ** 2, data);
     }
@@ -3749,7 +3904,7 @@ test "sqlite: create aggregate function with no aggregate context" {
     var db = try getTestDb();
     defer db.deinit();
 
-    var rand = std.Random.DefaultPrng.init(@intCast(std.time.milliTimestamp()));
+    var rand = std.Random.DefaultPrng.init(@intCast((std.Io.Clock.now(.real, std.testing.io)).toSeconds()));
 
     // Create an aggregate function working with a MyContext
 
@@ -3810,7 +3965,7 @@ test "sqlite: create aggregate function with an aggregate context" {
     var db = try getTestDb();
     defer db.deinit();
 
-    var rand = std.Random.DefaultPrng.init(@intCast(std.time.milliTimestamp()));
+    var rand = std.Random.DefaultPrng.init(@intCast((std.Io.Clock.now(.real, std.testing.io)).toSeconds()));
 
     try db.createAggregateFunction(
         "mySum",
@@ -4054,64 +4209,66 @@ test "reuse same field twice in query string" {
 
 test "fuzzing" {
     const Context = struct {
-        fn testOne(_: @This(), input: []const u8) anyerror!void {
-            var db = try Db.init(.{
-                .mode = .Memory,
-                .open_flags = .{
-                    .write = true,
-                    .create = true,
-                },
-            });
-            defer db.deinit();
+        fn testOne(_: @This(), smith: *testing.Smith) anyerror!void {
+            if (smith.in) |input| {
+                var db = try Db.init(.{
+                    .mode = .Memory,
+                    .open_flags = .{
+                        .write = true,
+                        .create = true,
+                    },
+                });
+                defer db.deinit();
 
-            try db.exec("CREATE TABLE test(id integer primary key, name text, data blob)", .{}, .{});
+                try db.exec("CREATE TABLE test(id integer primary key, name text, data blob)", .{}, .{});
 
-            db.execDynamic(input, .{}, .{}) catch |err| switch (err) {
-                error.SQLiteError => return,
-                error.ExecReturnedData => return,
-                error.EmptyQuery => return,
-                else => return err,
-            };
+                db.execDynamic(input, .{}, .{}) catch |err| switch (err) {
+                    error.SQLiteError => return,
+                    error.ExecReturnedData => return,
+                    error.EmptyQuery => return,
+                    else => return err,
+                };
 
-            db.execDynamic(
-                "INSERT INTO test(name, data) VALUES($name, $data)",
-                .{},
-                .{
-                    .name = "foo",
-                    .data = input,
-                },
-            ) catch |err| switch (err) {
-                error.SQLiteError => return,
-                else => return err,
-            };
+                db.execDynamic(
+                    "INSERT INTO test(name, data) VALUES($name, $data)",
+                    .{},
+                    .{
+                        .name = "foo",
+                        .data = input,
+                    },
+                ) catch |err| switch (err) {
+                    error.SQLiteError => return,
+                    else => return err,
+                };
 
-            var stmt = db.prepareDynamic("SELECT name, data FROM test") catch |err| switch (err) {
-                error.SQLiteError => return,
-                else => return err,
-            };
-            defer stmt.deinit();
+                var stmt = db.prepareDynamic("SELECT name, data FROM test") catch |err| switch (err) {
+                    error.SQLiteError => return,
+                    else => return err,
+                };
+                defer stmt.deinit();
 
-            var rows_memory: [4096]u8 = undefined;
-            var rows_fba = std.heap.FixedBufferAllocator.init(&rows_memory);
+                var rows_memory: [4096]u8 = undefined;
+                var rows_fba = std.heap.FixedBufferAllocator.init(&rows_memory);
 
-            const row_opt = stmt.oneAlloc(
-                struct {
-                    name: Text,
-                    data: Blob,
-                },
-                rows_fba.allocator(),
-                .{},
-                .{},
-            ) catch |err| switch (err) {
-                error.SQLiteError => return,
-                else => return err,
-            };
+                const row_opt = stmt.oneAlloc(
+                    struct {
+                        name: Text,
+                        data: Blob,
+                    },
+                    rows_fba.allocator(),
+                    .{},
+                    .{},
+                ) catch |err| switch (err) {
+                    error.SQLiteError => return,
+                    else => return err,
+                };
 
-            if (row_opt) |row| {
-                if (!std.mem.eql(u8, row.name.data, "foo")) return error.InvalidNameField;
-                if (!std.mem.eql(u8, row.data.data, input)) return error.InvalidDataField;
-            } else {
-                return error.NoRowsFound;
+                if (row_opt) |row| {
+                    if (!std.mem.eql(u8, row.name.data, "foo")) return error.InvalidNameField;
+                    if (!std.mem.eql(u8, row.data.data, input)) return error.InvalidDataField;
+                } else {
+                    return error.NoRowsFound;
+                }
             }
         }
     };

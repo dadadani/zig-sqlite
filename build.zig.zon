@@ -1,12 +1,12 @@
 .{
     .name = .sqlite,
     .fingerprint = 0xb8bb86826b7f6417,
-    .minimum_zig_version = "0.14.0",
+    .minimum_zig_version = "0.16.0-dev.2682+02142a54d",
     .version = "3.48.0",
     .dependencies = .{
         .sqlite = .{
-            .url = "https://www.sqlite.org/2025/sqlite-amalgamation-3490200.zip",
-            .hash = "N-V-__8AAH-mpwB7g3MnqYU-ooUBF1t99RP27dZ9addtMVXD",
+            .url = "https://sqlite.org/2026/sqlite-amalgamation-3510200.zip",
+            .hash = "N-V-__8AALNmqgBz73I7J8GlQS_kCPTRgxS0rm8gXcEM8Evk",
         },
     },
     .paths = .{"."},

@@ -156,7 +156,6 @@ pub const BestIndexBuilder = struct {
 
     /// Internal state
     allocator: mem.Allocator,
-    id_str_buffer: std.ArrayList(u8),
     index_info: *c.sqlite3_index_info,
 
     /// List of WHERE clause constraints
@@ -210,7 +209,6 @@ pub const BestIndexBuilder = struct {
         const res = Self{
             .allocator = allocator,
             .index_info = index_info,
-            .id_str_buffer = .empty,
             .constraints = try allocator.alloc(Constraint, @intCast(index_info.nConstraint)),
             .columns_used = @intCast(index_info.colUsed),
             .id = .{},
@@ -1064,13 +1062,15 @@ const TestVirtualTable = struct {
         debug.print("connect\n", .{});
     }
 
-    pub const BuildBestIndexError = error{} || mem.Allocator.Error;
+    pub const BuildBestIndexError = error{} || mem.Allocator.Error || std.Io.Writer.Error;
 
     pub fn buildBestIndex(self: *TestVirtualTable, diags: *VTabDiagnostics, builder: *BestIndexBuilder) BuildBestIndexError!void {
         _ = self;
         _ = diags;
 
-        var id_str_writer = builder.id_str_buffer.writer(builder.allocator);
+        var id_str_writer = std.Io.Writer.Allocating.init(builder.allocator);
+        errdefer id_str_writer.deinit();
+        // var id_str_writer = builder.id_str_buffer.writer(builder.allocator);
 
         var argv_index: i32 = 0;
         for (builder.constraints) |*constraint| {
@@ -1078,13 +1078,11 @@ const TestVirtualTable = struct {
                 argv_index += 1;
                 constraint.usage.argv_index = argv_index;
 
-                try id_str_writer.print("={d:<6}", .{constraint.column});
+                try id_str_writer.writer.print("={d:<6}", .{constraint.column});
             }
         }
 
-        //
-
-        builder.id.str = try builder.id_str_buffer.toOwnedSlice(builder.allocator);
+        builder.id.str = try id_str_writer.toOwnedSlice();
         builder.estimated_cost = 200;
         builder.estimated_rows = 200;
 
@@ -1174,7 +1172,7 @@ const TestVirtualTableCursor = struct {
             // 3 chars for the '=' marker
             // 6 chars because we format all columns in a 6 char wide string
             const col_str = id[pos + 1 .. pos + 1 + 6];
-            const col = try fmt.parseInt(i32, mem.trimRight(u8, col_str, " "), 10);
+            const col = try fmt.parseInt(i32, mem.trimEnd(u8, col_str, " "), 10);
 
             id = id[pos + 1 + 6 ..];
 
