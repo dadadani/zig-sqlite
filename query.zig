@@ -36,14 +36,13 @@ pub fn ParsedQuery(comptime tmp_query: []const u8) type {
         pub const bind_markers = result.bind_markers[0..result.bind_markers_len];
 
         pub fn getQuery() []const u8 {
-            return Self.result.query[0..Self.result.query_len];
+            return Self.result.query;
         }
 
         const ParsedQueryResult = struct {
             bind_markers: [128]BindMarker,
             bind_markers_len: usize,
-            query: [tmp_query.len]u8,
-            query_len: usize,
+            query: []const u8,
         };
 
         fn parse() ParsedQueryResult {
@@ -147,10 +146,8 @@ pub fn ParsedQuery(comptime tmp_query: []const u8) type {
                                 // This marks the end of the named bind marker.
                                 state = .start;
                                 const name = buf[hold_pos - 1 .. pos];
-                                // TODO(vincent): name retains a pointer to a comptime var, FIX !
                                 if (bindMarkerForName(tmp_bind_markers[0..nb_tmp_bind_markers], name) == null) {
-                                    const new_buf = buf;
-                                    tmp_bind_markers[nb_tmp_bind_markers].name = new_buf[hold_pos - 1 .. pos];
+                                    tmp_bind_markers[nb_tmp_bind_markers].name = std.fmt.comptimePrint("{s}", .{name});
                                     nb_tmp_bind_markers += 1;
                                 }
                             }
@@ -197,8 +194,8 @@ pub fn ParsedQuery(comptime tmp_query: []const u8) type {
                     nb_tmp_bind_markers += 1;
                 },
                 .bind_marker_identifier => {
-                    const new_buf = buf;
-                    tmp_bind_markers[nb_tmp_bind_markers].name = @as([]const u8, new_buf[hold_pos - 1 .. pos]);
+                    const name = buf[hold_pos - 1 .. pos];
+                    tmp_bind_markers[nb_tmp_bind_markers].name = std.fmt.comptimePrint("{s}", .{name});
                     nb_tmp_bind_markers += 1;
                 },
                 .start => {},
@@ -207,14 +204,12 @@ pub fn ParsedQuery(comptime tmp_query: []const u8) type {
 
             const final_bind_markers = tmp_bind_markers;
             const final_bind_markers_len = nb_tmp_bind_markers;
-            const final_buf = buf;
-            const final_query_len = pos;
+            const final_query = std.fmt.comptimePrint("{s}", .{buf[0..pos]});
 
             return .{
                 .bind_markers = final_bind_markers,
                 .bind_markers_len = final_bind_markers_len,
-                .query = final_buf,
-                .query_len = final_query_len,
+                .query = final_query,
             };
         }
     };
