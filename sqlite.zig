@@ -9,7 +9,6 @@ const testing = std.testing;
 
 pub const sqliteTransientAsDestructor = @import("libsqlite-workaround").sqliteTransientAsDestructor;
 
-
 pub const c = @import("c.zig").c;
 const versionGreaterThanOrEqualTo = @import("c.zig").versionGreaterThanOrEqualTo;
 
