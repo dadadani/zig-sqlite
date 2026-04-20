@@ -50,6 +50,10 @@ jobs:
         with:
           path: |
             zig-cache
+            .zig-cache
+            .zig-global-cache
+            zig-out
+            zig-pkg
             ~/.cache/zig
           key: ${{ runner.os }}-${{ matrix.os }}-zig-${{ github.sha }}
           restore-keys: ${{ runner.os }}-${{ matrix.os }}-zig-
