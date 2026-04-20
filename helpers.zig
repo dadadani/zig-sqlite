@@ -3,6 +3,8 @@ const debug = std.debug;
 
 const c = @import("c.zig").c;
 
+const sqliteTransientAsDestructor = @import("libsqlite-workaround").sqliteTransientAsDestructor;
+
 const Blob = @import("sqlite.zig").Blob;
 const Text = @import("sqlite.zig").Text;
 
@@ -13,8 +15,8 @@ pub fn setResult(ctx: ?*c.sqlite3_context, result: anytype) void {
     const ResultType = @TypeOf(result);
 
     switch (ResultType) {
-        Text => c.sqlite3_result_text(ctx, result.data.ptr, @intCast(result.data.len), c.sqliteTransientAsDestructor()),
-        Blob => c.sqlite3_result_blob(ctx, result.data.ptr, @intCast(result.data.len), c.sqliteTransientAsDestructor()),
+        Text => c.sqlite3_result_text(ctx, result.data.ptr, @intCast(result.data.len), sqliteTransientAsDestructor()),
+        Blob => c.sqlite3_result_blob(ctx, result.data.ptr, @intCast(result.data.len), sqliteTransientAsDestructor()),
         else => switch (@typeInfo(ResultType)) {
             .int => |info| if ((info.bits + if (info.signedness == .unsigned) 1 else 0) <= 32) {
                 c.sqlite3_result_int(ctx, result);
@@ -26,12 +28,12 @@ pub fn setResult(ctx: ?*c.sqlite3_context, result: anytype) void {
             .float => c.sqlite3_result_double(ctx, result),
             .bool => c.sqlite3_result_int(ctx, if (result) 1 else 0),
             .array => |arr| switch (arr.child) {
-                u8 => c.sqlite3_result_blob(ctx, &result, arr.len, c.sqliteTransientAsDestructor()),
+                u8 => c.sqlite3_result_blob(ctx, &result, arr.len, sqliteTransientAsDestructor()),
                 else => @compileError("cannot use a result of type " ++ @typeName(ResultType)),
             },
             .pointer => |ptr| switch (ptr.size) {
                 .slice => switch (ptr.child) {
-                    u8 => c.sqlite3_result_text(ctx, result.ptr, @intCast(result.len), c.sqliteTransientAsDestructor()),
+                    u8 => c.sqlite3_result_text(ctx, result.ptr, @intCast(result.len), sqliteTransientAsDestructor()),
                     else => @compileError("cannot use a result of type " ++ @typeName(ResultType)),
                 },
                 else => @compileError("cannot use a result of type " ++ @typeName(ResultType)),

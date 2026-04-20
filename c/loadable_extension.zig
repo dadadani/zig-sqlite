@@ -1,7 +1,11 @@
-pub const c = @cImport({
-    @cInclude("loadable-ext-sqlite3ext.h");
-    @cInclude("workaround.h");
-});
+//pub const c = @cImport({
+//    @cInclude("loadable-ext-sqlite3ext.h");
+//    @cInclude("workaround.h");
+//});
+
+pub const c = @import("libsqlite-ext");
+
+pub const sqliteTransientAsDestructor = @import("libsqlite-workaround").sqliteTransientAsDestructor;
 
 pub var sqlite3_api: [*c]c.sqlite3_api_routines = null;
 

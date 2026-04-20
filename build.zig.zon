@@ -5,8 +5,12 @@
     .version = "3.48.0",
     .dependencies = .{
         .sqlite = .{
-            .url = "https://sqlite.org/2026/sqlite-amalgamation-3510200.zip",
-            .hash = "N-V-__8AALNmqgBz73I7J8GlQS_kCPTRgxS0rm8gXcEM8Evk",
+            .url = "https://sqlite.org/2026/sqlite-amalgamation-3530000.zip",
+            .hash = "N-V-__8AAAzxrQBNeXdRXqDQlfE8r_r9PGiSWKATj50chaqM",
+        },
+        .translate_c = .{
+            .url = "git+https://codeberg.org/ziglang/translate-c#46b5609b5ac4c0a896217d1d984f3ae50e4810b5",
+            .hash = "translate_c-0.0.0-Q_BUWpf0BgAwrh5AM-acJcslN_YPEhcoCVKbbNjwuUTJ",
         },
     },
     .paths = .{"."},

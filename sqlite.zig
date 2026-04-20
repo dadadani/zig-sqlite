@@ -7,6 +7,9 @@ const io = std.Io;
 const mem = std.mem;
 const testing = std.testing;
 
+pub const sqliteTransientAsDestructor = @import("libsqlite-workaround").sqliteTransientAsDestructor;
+
+
 pub const c = @import("c.zig").c;
 const versionGreaterThanOrEqualTo = @import("c.zig").versionGreaterThanOrEqualTo;
 
@@ -1816,7 +1819,7 @@ pub const DynamicStatement = struct {
                         const data: []const u8 = field[0..field.len];
 
                         // NOTE(vincent): The array is temporary and must be copied, therefore we use SQLITE_TRANSIENT
-                        const result = c.sqlite3_bind_text(self.stmt, column, data.ptr, @intCast(data.len), c.sqliteTransientAsDestructor());
+                        const result = c.sqlite3_bind_text(self.stmt, column, data.ptr, @intCast(data.len), sqliteTransientAsDestructor());
                         return convertResultToError(result);
                     },
                     else => @compileError("cannot bind field " ++ field_name ++ " of type array of " ++ @typeName(arr.child)),
@@ -2122,7 +2125,7 @@ pub const DynamicStatement = struct {
     pub fn all(self: *Self, comptime Type: type, allocator: mem.Allocator, options: QueryOptions, values: anytype) ![]Type {
         var iter = try self.iteratorAlloc(Type, allocator, values);
 
-        var rows: std.ArrayList(Type) = .{};
+        var rows: std.ArrayList(Type) = .empty;
         while (try iter.nextAlloc(allocator, options)) |row| {
             try rows.append(allocator, row);
         }
@@ -2412,7 +2415,7 @@ pub fn Statement(comptime opts: StatementOptions, comptime query: anytype) type 
         pub fn all(self: *Self, comptime Type: type, allocator: mem.Allocator, options: QueryOptions, values: anytype) ![]Type {
             var iter = try self.iteratorAlloc(Type, allocator, values);
 
-            var rows: std.ArrayList(Type) = .{};
+            var rows: std.ArrayList(Type) = .empty;
             while (try iter.nextAlloc(allocator, options)) |row| {
                 try rows.append(allocator, row);
             }
@@ -3175,7 +3178,7 @@ test "sqlite: statement iterator" {
     var stmt = try db.prepare("INSERT INTO user(name, id, age, weight, favorite_color) VALUES(?{[]const u8}, ?{usize}, ?{usize}, ?{f32}, ?{[]const u8})");
     defer stmt.deinit();
 
-    var expected_rows: std.ArrayList(TestUser) = .{};
+    var expected_rows: std.ArrayList(TestUser) = .empty;
     var i: usize = 0;
     while (i < 20) : (i += 1) {
         const name = try std.fmt.allocPrint(allocator, "Vincent {d}", .{i});
@@ -3202,7 +3205,7 @@ test "sqlite: statement iterator" {
 
         var iter = try stmt2.iterator(RowType, .{});
 
-        var rows: std.ArrayList(RowType) = .{};
+        var rows: std.ArrayList(RowType) = .empty;
         while (try iter.next(.{})) |row| {
             try rows.append(allocator, row);
         }
@@ -3229,7 +3232,7 @@ test "sqlite: statement iterator" {
 
         var iter = try stmt2.iterator(RowType, .{});
 
-        var rows: std.ArrayList(RowType) = .{};
+        var rows: std.ArrayList(RowType) = .empty;
         while (try iter.nextAlloc(allocator, .{})) |row| {
             try rows.append(allocator, row);
         }
@@ -3614,7 +3617,7 @@ test "sqlite: bind runtime slice" {
     const allocator = arena.allocator();
 
     // creating array list on heap so that it's deemed runtime size
-    var list: std.ArrayList([]const u8) = .{};
+    var list: std.ArrayList([]const u8) = .empty;
     defer list.deinit(allocator);
     try list.append(allocator, "this is some data");
     const args = try list.toOwnedSlice(allocator);
@@ -4032,7 +4035,7 @@ test "sqlite: empty slice" {
     defer db.deinit();
     try addTestData(&db);
 
-    var list: std.ArrayList(u8) = .{};
+    var list: std.ArrayList(u8) = .empty;
     const ptr = try list.toOwnedSlice(allocator);
 
     try db.exec("INSERT INTO article(author_id, data) VALUES(?, ?)", .{}, .{ 1, ptr });

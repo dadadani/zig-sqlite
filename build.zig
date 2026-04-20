@@ -8,6 +8,8 @@ const builtin = @import("builtin");
 
 const Preprocessor = @import("build/Preprocessor.zig");
 
+const Translator = @import("translate_c").Translator;
+
 fn getTarget(original_target: ResolvedTarget) ResolvedTarget {
     var tmp = original_target;
 
@@ -110,11 +112,7 @@ fn computeTestTargets(isNative: bool, ci: ?bool) ?[]const TestTarget {
 
 // This creates a SQLite static library from the SQLite dependency code.
 fn makeSQLiteLib(b: *std.Build, dep: *std.Build.Dependency, c_flags: []const []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, sqlite_c: enum { with, without }) *std.Build.Step.Compile {
-    const mod = b.addModule("lib-sqlite", .{
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
+    const mod = b.addModule("lib-sqlite", .{ .target = target, .optimize = optimize, .link_libc = true });
     const lib = b.addLibrary(.{
         .name = "sqlite",
         .linkage = .static,
@@ -176,14 +174,44 @@ pub fn build(b: *std.Build) !void {
     // Main library and module
     //
 
+    const translate_c = b.dependency("translate_c", .{});
+
+    const translator_sqlite: Translator = .init(translate_c, .{
+        .c_source_file = sqlite_dep.path("sqlite3.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const translator_workaround: Translator = .init(translate_c, .{
+        .c_source_file = b.path("c/workaround.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const translator_ext: Translator = .init(translate_c, .{
+        .c_source_file = b.path("c/loadable-ext-sqlite3ext.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     // const sqlite_lib, const sqlite_mod = blk: {
     const sqlite_lib, _ = blk: {
         const lib = makeSQLiteLib(b, sqlite_dep, c_flags, target, optimize, .with);
 
-        const mod = b.addModule("sqlite", .{
-            .root_source_file = b.path("sqlite.zig"),
-            .link_libc = true,
-        });
+        const mod = b.addModule("sqlite", .{ .root_source_file = b.path("sqlite.zig"), .link_libc = true, .imports = &.{
+            .{
+                .name = "libsqlite",
+                .module = translator_sqlite.mod,
+            },
+            .{
+                .name = "libsqlite-workaround",
+                .module = translator_workaround.mod,
+            },
+            .{
+                .name = "libsqlite-ext",
+                .module = translator_ext.mod,
+            },
+        } });
         mod.addIncludePath(b.path("c"));
         mod.addIncludePath(sqlite_dep.path("."));
         mod.linkLibrary(lib);
@@ -199,6 +227,20 @@ pub fn build(b: *std.Build) !void {
         const mod = b.addModule("sqliteext", .{
             .root_source_file = b.path("sqlite.zig"),
             .link_libc = true,
+            .imports = &.{
+                .{
+                    .name = "libsqlite",
+                    .module = translator_sqlite.mod,
+                },
+                .{
+                    .name = "libsqlite-workaround",
+                    .module = translator_workaround.mod,
+                },
+                .{
+                    .name = "libsqlite-ext",
+                    .module = translator_ext.mod,
+                },
+            },
         });
         mod.addIncludePath(b.path("c"));
         mod.linkLibrary(lib);
@@ -231,11 +273,43 @@ pub fn build(b: *std.Build) !void {
 
         const test_sqlite_lib = makeSQLiteLib(b, sqlite_dep, c_flags, cross_target, optimize, .with);
 
+        const test_translator_sqlite: Translator = .init(translate_c, .{
+            .c_source_file = sqlite_dep.path("sqlite3.h"),
+            .target = cross_target,
+            .optimize = optimize,
+        });
+
+        const test_translator_workaround: Translator = .init(translate_c, .{
+            .c_source_file = b.path("c/workaround.h"),
+            .target = cross_target,
+            .optimize = optimize,
+        });
+
+        const test_translator_ext: Translator = .init(translate_c, .{
+            .c_source_file = b.path("c/loadable-ext-sqlite3ext.h"),
+            .target = cross_target,
+            .optimize = optimize,
+        });
+
         const mod = b.addModule(test_name, .{
             .target = cross_target,
             .optimize = optimize,
             .root_source_file = b.path("sqlite.zig"),
             .single_threaded = test_target.single_threaded,
+            .imports = &.{
+                .{
+                    .name = "libsqlite",
+                    .module = test_translator_sqlite.mod,
+                },
+                .{
+                    .name = "libsqlite-workaround",
+                    .module = test_translator_workaround.mod,
+                },
+                .{
+                    .name = "libsqlite-ext",
+                    .module = test_translator_ext.mod,
+                },
+            },
         });
 
         const tests = b.addTest(.{

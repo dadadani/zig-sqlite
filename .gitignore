@@ -8,3 +8,6 @@ core.*
 /fuzz/outputs
 adapter.zig
 zig-pkg
+.codex
+.zig-global-cache
+.direnv
