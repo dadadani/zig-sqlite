@@ -1,12 +1,12 @@
 .{
     .name = .sqlite,
     .fingerprint = 0xb8bb86826b7f6417,
-    .minimum_zig_version = "0.17.0-dev.228+ce198b7c2",
+    .minimum_zig_version = "0.17.0-dev.251+0db721ec2",
     .version = "3.48.0",
     .dependencies = .{
         .sqlite = .{
-            .url = "https://sqlite.org/2026/sqlite-amalgamation-3530000.zip",
-            .hash = "N-V-__8AAAzxrQBNeXdRXqDQlfE8r_r9PGiSWKATj50chaqM",
+            .url = "https://sqlite.org/2026/sqlite-amalgamation-3530100.zip",
+            .hash = "N-V-__8AAK_4rQDqNybRFADVHf986hCbR9ln5ez1iWpmBV5L",
         },
         .translate_c = .{
             .url = "git+https://codeberg.org/codan/translate-c#a8613eee504a047be9877042f06cc9ea2909d49e",
