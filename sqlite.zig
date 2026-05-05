@@ -32,6 +32,11 @@ test {
 
 const logger = std.log.scoped(.sqlite);
 
+fn repeat(comptime s: []const u8, comptime n: usize) [s.len * n]u8 {
+    const arr: [n][s.len]u8 = @splat(s[0..s.len].*);
+    return @bitCast(arr);
+}
+
 // Returns true if the passed type is a struct.
 fn isStruct(comptime T: type) bool {
     const type_info = @typeInfo(T);
@@ -3286,7 +3291,7 @@ test "sqlite: blob open, reopen" {
         var blob_reader = blob.reader();
         const data = try blob_reader.allocRemaining(allocator, .limited(8192));
 
-        try testing.expectEqualSlices(u8, blob_data1 ** 2, data);
+        try testing.expectEqualSlices(u8, &repeat(blob_data1, 2), data);
     }
 
     // Reopen the blob in the second row
@@ -3303,7 +3308,7 @@ test "sqlite: blob open, reopen" {
         var blob_reader = blob.reader();
         const data = try blob_reader.allocRemaining(allocator, .limited(8192));
 
-        try testing.expectEqualSlices(u8, blob_data2 ** 2, data);
+        try testing.expectEqualSlices(u8, &repeat(blob_data2, 2), data);
     }
 
     try blob.close();
@@ -3554,7 +3559,7 @@ const MyData = struct {
     pub fn readField(alloc: mem.Allocator, value: BaseType) !MyData {
         _ = alloc;
 
-        var result = [_]u8{0} ** 16;
+        var result = repeat(&[_]u8{0}, 16);
         var i: usize = 0;
         while (i < result.len) : (i += 1) {
             const j = i * 2;
