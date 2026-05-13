@@ -1047,9 +1047,9 @@ const TestVirtualTable = struct {
         res.rows = rows;
 
         // Build the schema
-        res.schema = try allocator.dupeZ(u8,
+        res.schema = try allocator.dupeSentinel(u8,
             \\CREATE TABLE foobar(foo TEXT, bar TEXT, baz INTEGER)
-        );
+        , 0);
 
         res.arena_state = arena.state;
 
