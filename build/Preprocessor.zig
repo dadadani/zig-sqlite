@@ -1,6 +1,17 @@
 const std = @import("std");
 const debug = std.debug;
 const mem = std.mem;
+const fatal = std.process.fatal;
+
+pub fn main(init: std.process.Init) !void {
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
+    if (args.len != 7) fatal("usage: {s} sqlite3 <in> <out> sqlite3ext <in> <out>", .{args[0]});
+    if (!mem.eql(u8, args[1], "sqlite3")) fatal("expected sqlite3 action, got {s}", .{args[1]});
+    if (!mem.eql(u8, args[4], "sqlite3ext")) fatal("expected sqlite3ext action, got {s}", .{args[4]});
+
+    try sqlite3(init.io, init.arena.allocator(), args[2], args[3]);
+    try sqlite3ext(init.io, init.arena.allocator(), args[5], args[6]);
+}
 
 // This tool is used to preprocess the sqlite3 headers to make them usable to build loadable extensions.
 //
@@ -27,11 +38,11 @@ const mem = std.mem;
 fn readOriginalData(io: std.Io, allocator: mem.Allocator, path: []const u8) ![]const u8 {
     var file = try std.Io.Dir.cwd().openFile(io, path, .{});
     defer file.close(io);
+    const stat = try file.stat(io);
     var buf: [1024]u8 = undefined;
     var reader = file.reader(io, &buf);
 
-    const data = reader.interface.readAlloc(allocator, 1024 * 1024);
-    return data;
+    return try reader.interface.readAlloc(allocator, @intCast(stat.size));
 }
 
 const Processor = struct {

@@ -6,8 +6,6 @@ const ResolvedTarget = std.Build.ResolvedTarget;
 const Query = std.Target.Query;
 const builtin = @import("builtin");
 
-const Preprocessor = @import("build/Preprocessor.zig");
-
 const Translator = @import("translate_c").Translator;
 
 fn getTarget(original_target: ResolvedTarget) ResolvedTarget {
@@ -175,6 +173,7 @@ pub fn build(b: *std.Build) !void {
     //
 
     const translate_c = b.dependency("translate_c", .{});
+    const generated_headers = addPreprocessStep(b, sqlite_dep);
 
     const translator_sqlite: Translator = .init(translate_c, .{
         .c_source_file = sqlite_dep.path("sqlite3.h"),
@@ -189,10 +188,11 @@ pub fn build(b: *std.Build) !void {
     });
 
     const translator_ext: Translator = .init(translate_c, .{
-        .c_source_file = b.path("c/loadable-ext-sqlite3ext.h"),
+        .c_source_file = generated_headers.sqlite3ext_h,
         .target = target,
         .optimize = optimize,
     });
+    translator_ext.addIncludePath(generated_headers.dir);
 
     // const sqlite_lib, const sqlite_mod = blk: {
     const sqlite_lib, _ = blk: {
@@ -286,10 +286,11 @@ pub fn build(b: *std.Build) !void {
         });
 
         const test_translator_ext: Translator = .init(translate_c, .{
-            .c_source_file = b.path("c/loadable-ext-sqlite3ext.h"),
+            .c_source_file = generated_headers.sqlite3ext_h,
             .target = cross_target,
             .optimize = optimize,
         });
+        test_translator_ext.addIncludePath(generated_headers.dir);
 
         const mod = b.addModule(test_name, .{
             .target = cross_target,
@@ -338,30 +339,42 @@ pub fn build(b: *std.Build) !void {
     //\ zigcrypto_test_run.step.dependOn(&zigcrypto_install_artifact.step);
     //\ test_step.dependOn(&zigcrypto_test_run.step);
 
-    //
-    // Tools
-    //
-
-    addPreprocessStep(b, sqlite_dep);
 }
 
-fn addPreprocessStep(b: *std.Build, sqlite_dep: *std.Build.Dependency) void {
-    var wf = b.addWriteFiles();
+const GeneratedHeaders = struct {
+    sqlite3_h: std.Build.LazyPath,
+    sqlite3ext_h: std.Build.LazyPath,
+    dir: std.Build.LazyPath,
+};
 
-    // Preprocessing step
-    const preprocess = PreprocessStep.create(b, .{
-        .source = sqlite_dep.path("."),
-        .target = wf.getDirectory(),
+fn addPreprocessStep(b: *std.Build, sqlite_dep: *std.Build.Dependency) GeneratedHeaders {
+    const preprocessor_mod = b.createModule(.{
+        .root_source_file = b.path("build/Preprocessor.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
     });
-    preprocess.step.dependOn(&wf.step);
+    const preprocessor = b.addExecutable(.{
+        .name = "preprocess-headers",
+        .root_module = preprocessor_mod,
+    });
+    const preprocess = b.addRunArtifact(preprocessor);
 
-    const w = b.addUpdateSourceFiles();
-    w.addCopyFileToSource(preprocess.target.join(b.allocator, "loadable-ext-sqlite3.h") catch @panic("OOM"), "c/loadable-ext-sqlite3.h");
-    w.addCopyFileToSource(preprocess.target.join(b.allocator, "loadable-ext-sqlite3ext.h") catch @panic("OOM"), "c/loadable-ext-sqlite3ext.h");
-    w.step.dependOn(&preprocess.step);
+    preprocess.addArg("sqlite3");
+    preprocess.addFileArg(sqlite_dep.path("sqlite3.h"));
+    const sqlite3_h = preprocess.addOutputFileArg("loadable-ext-sqlite3.h");
 
-    const preprocess_headers = b.step("preprocess-headers", "Preprocess the headers for the loadable extensions");
-    preprocess_headers.dependOn(&w.step);
+    preprocess.addArg("sqlite3ext");
+    preprocess.addFileArg(sqlite_dep.path("sqlite3ext.h"));
+    const sqlite3ext_h = preprocess.addOutputFileArg("loadable-ext-sqlite3ext.h");
+
+    const preprocess_headers = b.step("preprocess-headers", "Generate the loadable extension headers");
+    preprocess_headers.dependOn(&preprocess.step);
+
+    return .{
+        .sqlite3_h = sqlite3_h,
+        .sqlite3ext_h = sqlite3ext_h,
+        .dir = sqlite3ext_h.dirname(),
+    };
 }
 
 fn addZigcrypto(b: *std.Build, sqlite_mod: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.InstallArtifact {
@@ -409,49 +422,4 @@ fn addZigcryptoTestRun(b: *std.Build, sqlite_mod: *std.Build.Module, target: std
 const EnableOptions = struct {
     // https://www.sqlite.org/fts5.html
     fts5: bool = false,
-};
-
-const PreprocessStep = struct {
-    const Config = struct {
-        source: std.Build.LazyPath,
-        target: std.Build.LazyPath,
-    };
-
-    step: std.Build.Step,
-
-    source: std.Build.LazyPath,
-    target: std.Build.LazyPath,
-
-    fn create(owner: *std.Build, config: Config) *PreprocessStep {
-        const step = owner.allocator.create(PreprocessStep) catch @panic("OOM");
-        step.* = .{
-            .step = std.Build.Step.init(.{
-                .id = std.Build.Step.Id.custom,
-                .name = "preprocess",
-                .owner = owner,
-                .makeFn = make,
-            }),
-            .source = config.source,
-            .target = config.target,
-        };
-
-        return step;
-    }
-
-    fn make(step: *std.Build.Step, _: std.Build.Step.MakeOptions) !void {
-        const ps: *PreprocessStep = @fieldParentPtr("step", step);
-        const owner = step.owner;
-
-        var threaded = std.Io.Threaded.init(owner.allocator, .{ .environ = .empty });
-        defer threaded.deinit();
-
-        const sqlite3_h = try ps.source.path(owner, "sqlite3.h").getPath3(owner, step).toString(owner.allocator);
-        const sqlite3ext_h = try ps.source.path(owner, "sqlite3ext.h").getPath3(owner, step).toString(owner.allocator);
-
-        const loadable_sqlite3_h = try ps.target.path(owner, "loadable-ext-sqlite3.h").getPath3(owner, step).toString(owner.allocator);
-        const loadable_sqlite3ext_h = try ps.target.path(owner, "loadable-ext-sqlite3ext.h").getPath3(owner, step).toString(owner.allocator);
-
-        try Preprocessor.sqlite3(threaded.io(), owner.allocator, sqlite3_h, loadable_sqlite3_h);
-        try Preprocessor.sqlite3ext(threaded.io(), owner.allocator, sqlite3ext_h, loadable_sqlite3ext_h);
-    }
 };
