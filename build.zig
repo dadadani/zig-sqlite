@@ -269,7 +269,7 @@ pub fn build(b: *std.Build) !void {
     //
     // If you want to execute tests for other targets you can pass -fqemu, -fdarling, -fwine, -frosetta.
 
-    for (test_targets) |test_target| {
+    for (test_targets, 0..) |test_target, i| {
         const cross_target = getTarget(b.resolveTargetQuery(test_target.query));
         const single_threaded_txt = if (test_target.single_threaded) "single" else "multi";
         const test_name = b.fmt("{s}-{s}-{s}", .{
@@ -278,7 +278,9 @@ pub fn build(b: *std.Build) !void {
             single_threaded_txt,
         });
 
-        const test_sqlite_lib = makeSQLiteLib(b, "testing", sqlite_dep, c_flags, cross_target, optimize, .with);
+        const name = b.fmt("testing{d}", i);
+
+        const test_sqlite_lib = makeSQLiteLib(b, name, sqlite_dep, c_flags, cross_target, optimize, .with);
 
         const test_translator_sqlite: Translator = .init(translate_c, .{
             .c_source_file = sqlite_dep.path("sqlite3.h"),
