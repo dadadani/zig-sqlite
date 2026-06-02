@@ -109,8 +109,15 @@ fn computeTestTargets(isNative: bool, ci: ?bool) ?[]const TestTarget {
 }
 
 // This creates a SQLite static library from the SQLite dependency code.
-fn makeSQLiteLib(b: *std.Build, dep: *std.Build.Dependency, c_flags: []const []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, sqlite_c: enum { with, without }) *std.Build.Step.Compile {
-    const mod = b.addModule("lib-sqlite", .{ .target = target, .optimize = optimize, .link_libc = true });
+fn makeSQLiteLib(b: *std.Build, suffix_name: []const u8, dep: *std.Build.Dependency, c_flags: []const []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, sqlite_c: enum { with, without }) *std.Build.Step.Compile {
+    const name = switch (sqlite_c) {
+        .with => "lib-sqlite-with-sqlite-c",
+        .without => "lib-sqlite-without-sqlite-c",
+    };
+
+    const name_full = b.fmt("{s}-{s}", .{ name, suffix_name });
+
+    const mod = b.addModule(name_full, .{ .target = target, .optimize = optimize, .link_libc = true });
     const lib = b.addLibrary(.{
         .name = "sqlite",
         .linkage = .static,
@@ -196,7 +203,7 @@ pub fn build(b: *std.Build) !void {
 
     // const sqlite_lib, const sqlite_mod = blk: {
     const sqlite_lib, _ = blk: {
-        const lib = makeSQLiteLib(b, sqlite_dep, c_flags, target, optimize, .with);
+        const lib = makeSQLiteLib(b, "lib", sqlite_dep, c_flags, target, optimize, .with);
 
         const mod = b.addModule("sqlite", .{ .root_source_file = b.path("sqlite.zig"), .link_libc = true, .imports = &.{
             .{
@@ -222,7 +229,7 @@ pub fn build(b: *std.Build) !void {
 
     // const sqliteext_mod = blk: {
     _ = blk: {
-        const lib = makeSQLiteLib(b, sqlite_dep, c_flags, target, optimize, .without);
+        const lib = makeSQLiteLib(b, "lib", sqlite_dep, c_flags, target, optimize, .without);
 
         const mod = b.addModule("sqliteext", .{
             .root_source_file = b.path("sqlite.zig"),
@@ -271,7 +278,7 @@ pub fn build(b: *std.Build) !void {
             single_threaded_txt,
         });
 
-        const test_sqlite_lib = makeSQLiteLib(b, sqlite_dep, c_flags, cross_target, optimize, .with);
+        const test_sqlite_lib = makeSQLiteLib(b, "testing", sqlite_dep, c_flags, cross_target, optimize, .with);
 
         const test_translator_sqlite: Translator = .init(translate_c, .{
             .c_source_file = sqlite_dep.path("sqlite3.h"),
