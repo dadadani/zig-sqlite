@@ -278,7 +278,7 @@ pub fn build(b: *std.Build) !void {
             single_threaded_txt,
         });
 
-        const name = b.fmt("testing{d}", i);
+        const name = b.fmt("testing{d}", .{i});
 
         const test_sqlite_lib = makeSQLiteLib(b, name, sqlite_dep, c_flags, cross_target, optimize, .with);
 
