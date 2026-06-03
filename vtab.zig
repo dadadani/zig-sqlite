@@ -322,9 +322,9 @@ fn validateCursorType(comptime Table: type) void {
 
         const info = @typeInfo(@TypeOf(Cursor.init)).@"fn";
 
-        if (info.params.len != 2) @compileError(error_message);
-        if (info.params[0].type.? != mem.Allocator) @compileError(error_message);
-        if (info.params[1].type.? != *Table) @compileError(error_message);
+        if (info.param_types.len != 2) @compileError(error_message);
+        if (info.param_types[0].? != mem.Allocator) @compileError(error_message);
+        if (info.param_types[1].? != *Table) @compileError(error_message);
         if (info.return_type.? != Cursor.InitError!*Cursor) @compileError(error_message);
     }
 
@@ -340,8 +340,8 @@ fn validateCursorType(comptime Table: type) void {
 
         const info = @typeInfo(@TypeOf(Cursor.deinit)).@"fn";
 
-        if (info.params.len != 1) @compileError(error_message);
-        if (info.params[0].type.? != *Cursor) @compileError(error_message);
+        if (info.param_types.len != 1) @compileError(error_message);
+        if (info.param_types[0].? != *Cursor) @compileError(error_message);
         if (info.return_type.? != void) @compileError(error_message);
     }
 
@@ -361,9 +361,9 @@ fn validateCursorType(comptime Table: type) void {
 
         const info = @typeInfo(@TypeOf(Cursor.next)).@"fn";
 
-        if (info.params.len != 2) @compileError(error_message);
-        if (info.params[0].type.? != *Cursor) @compileError(error_message);
-        if (info.params[1].type.? != *VTabDiagnostics) @compileError(error_message);
+        if (info.param_types.len != 2) @compileError(error_message);
+        if (info.param_types[0].? != *Cursor) @compileError(error_message);
+        if (info.param_types[1].? != *VTabDiagnostics) @compileError(error_message);
         if (info.return_type.? != Cursor.NextError!void) @compileError(error_message);
     }
 
@@ -383,9 +383,9 @@ fn validateCursorType(comptime Table: type) void {
 
         const info = @typeInfo(@TypeOf(Cursor.hasNext)).@"fn";
 
-        if (info.params.len != 2) @compileError(error_message);
-        if (info.params[0].type.? != *Cursor) @compileError(error_message);
-        if (info.params[1].type.? != *VTabDiagnostics) @compileError(error_message);
+        if (info.param_types.len != 2) @compileError(error_message);
+        if (info.param_types[0].? != *Cursor) @compileError(error_message);
+        if (info.param_types[1].? != *VTabDiagnostics) @compileError(error_message);
         if (info.return_type.? != Cursor.HasNextError!bool) @compileError(error_message);
     }
 
@@ -405,11 +405,11 @@ fn validateCursorType(comptime Table: type) void {
 
         const info = @typeInfo(@TypeOf(Cursor.filter)).@"fn";
 
-        if (info.params.len != 4) @compileError(error_message);
-        if (info.params[0].type.? != *Cursor) @compileError(error_message);
-        if (info.params[1].type.? != *VTabDiagnostics) @compileError(error_message);
-        if (info.params[2].type.? != IndexIdentifier) @compileError(error_message);
-        if (info.params[3].type.? != []FilterArg) @compileError(error_message);
+        if (info.param_types.len != 4) @compileError(error_message);
+        if (info.param_types[0].? != *Cursor) @compileError(error_message);
+        if (info.param_types[1].? != *VTabDiagnostics) @compileError(error_message);
+        if (info.param_types[2].? != IndexIdentifier) @compileError(error_message);
+        if (info.param_types[3].? != []FilterArg) @compileError(error_message);
         if (info.return_type.? != Cursor.FilterError!void) @compileError(error_message);
     }
 
@@ -432,10 +432,10 @@ fn validateCursorType(comptime Table: type) void {
 
         const info = @typeInfo(@TypeOf(Cursor.column)).@"fn";
 
-        if (info.params.len != 3) @compileError(error_message);
-        if (info.params[0].type.? != *Cursor) @compileError(error_message);
-        if (info.params[1].type.? != *VTabDiagnostics) @compileError(error_message);
-        if (info.params[2].type.? != i32) @compileError(error_message);
+        if (info.param_types.len != 3) @compileError(error_message);
+        if (info.param_types[0].? != *Cursor) @compileError(error_message);
+        if (info.param_types[1].? != *VTabDiagnostics) @compileError(error_message);
+        if (info.param_types[2].? != i32) @compileError(error_message);
         if (info.return_type.? != Cursor.ColumnError!Cursor.Column) @compileError(error_message);
     }
 
@@ -455,9 +455,9 @@ fn validateCursorType(comptime Table: type) void {
 
         const info = @typeInfo(@TypeOf(Cursor.rowId)).@"fn";
 
-        if (info.params.len != 2) @compileError(error_message);
-        if (info.params[0].type.? != *Cursor) @compileError(error_message);
-        if (info.params[1].type.? != *VTabDiagnostics) @compileError(error_message);
+        if (info.param_types.len != 2) @compileError(error_message);
+        if (info.param_types[0].? != *Cursor) @compileError(error_message);
+        if (info.param_types[1].? != *VTabDiagnostics) @compileError(error_message);
         if (info.return_type.? != Cursor.RowIDError!i64) @compileError(error_message);
     }
 }
@@ -480,11 +480,11 @@ fn validateTableType(comptime Table: type) void {
 
         const info = @typeInfo(@TypeOf(Table.init)).@"fn";
 
-        if (info.params.len != 3) @compileError(error_message);
-        if (info.params[0].type.? != mem.Allocator) @compileError(error_message);
-        if (info.params[1].type.? != *VTabDiagnostics) @compileError(error_message);
+        if (info.param_types.len != 3) @compileError(error_message);
+        if (info.param_types[0].? != mem.Allocator) @compileError(error_message);
+        if (info.param_types[1].? != *VTabDiagnostics) @compileError(error_message);
         // TODO(vincent): maybe allow a signature without the params since a table can do withoout them
-        if (info.params[2].type.? != []const ModuleArgument) @compileError(error_message);
+        if (info.param_types[2].? != []const ModuleArgument) @compileError(error_message);
         if (info.return_type.? != Table.InitError!*Table) @compileError(error_message);
     }
 
@@ -500,9 +500,9 @@ fn validateTableType(comptime Table: type) void {
 
         const info = @typeInfo(@TypeOf(Table.deinit)).@"fn";
 
-        if (info.params.len != 2) @compileError(error_message);
-        if (info.params[0].type.? != *Table) @compileError(error_message);
-        if (info.params[1].type.? != mem.Allocator) @compileError(error_message);
+        if (info.param_types.len != 2) @compileError(error_message);
+        if (info.param_types[0].? != *Table) @compileError(error_message);
+        if (info.param_types[1].? != mem.Allocator) @compileError(error_message);
         if (info.return_type.? != void) @compileError(error_message);
     }
 
@@ -522,10 +522,10 @@ fn validateTableType(comptime Table: type) void {
 
         const info = @typeInfo(@TypeOf(Table.buildBestIndex)).@"fn";
 
-        if (info.params.len != 3) @compileError(error_message);
-        if (info.params[0].type.? != *Table) @compileError(error_message);
-        if (info.params[1].type.? != *VTabDiagnostics) @compileError(error_message);
-        if (info.params[2].type.? != *BestIndexBuilder) @compileError(error_message);
+        if (info.param_types.len != 3) @compileError(error_message);
+        if (info.param_types[0].? != *Table) @compileError(error_message);
+        if (info.param_types[1].? != *VTabDiagnostics) @compileError(error_message);
+        if (info.param_types[2].? != *BestIndexBuilder) @compileError(error_message);
         if (info.return_type.? != Table.BuildBestIndexError!void) @compileError(error_message);
     }
 
@@ -929,15 +929,15 @@ pub fn VirtualTable(
             switch (@typeInfo(ColumnType)) {
                 .@"union" => |info| {
                     if (info.tag_type) |UnionTagType| {
-                        inline for (info.fields) |u_field| {
+                        inline for (info.field_names) |u_field_name| {
 
                             // This wasn't entirely obvious when I saw code like this elsewhere, it works because of type coercion.
                             // See https://ziglang.org/documentation/master/#Type-Coercion-unions-and-enums
                             const column_tag: std.meta.Tag(ColumnType) = column;
-                            const this_tag: std.meta.Tag(ColumnType) = @field(UnionTagType, u_field.name);
+                            const this_tag: std.meta.Tag(ColumnType) = @field(UnionTagType, u_field_name);
 
                             if (column_tag == this_tag) {
-                                const column_value = @field(column, u_field.name);
+                                const column_value = @field(column, u_field_name);
 
                                 helpers.setResult(ctx, column_value);
                             }
