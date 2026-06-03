@@ -160,12 +160,14 @@ pub fn build(b: *std.Build) !void {
     defer flags.deinit(b.allocator);
     try flags.append(b.allocator, "-std=c99");
 
-    inline for (std.meta.fields(EnableOptions)) |field| {
-        const opt = b.option(bool, field.name, "Enable " ++ field.name) orelse field.defaultValue().?;
+    inline for (comptime std.meta.fieldNames(EnableOptions)) |field| {
+        const info = std.meta.fieldInfo(EnableOptions, std.meta.stringToEnum(std.meta.FieldEnum(EnableOptions), field).?);
+        const defaultValue = info.attrs.defaultValue(info.type).?;
+        const opt = b.option(bool, field, std.fmt.comptimePrint("Enable {s} (default: {})", .{ field, defaultValue })) orelse info.attrs.defaultValue(info.type).?;
 
         if (opt) {
-            var buf: [field.name.len]u8 = undefined;
-            const name = std.ascii.upperString(&buf, field.name);
+            var buf: [field.len]u8 = undefined;
+            const name = std.ascii.upperString(&buf, field);
             const flag = try std.fmt.allocPrint(b.allocator, "-DSQLITE_ENABLE_{s}", .{name});
 
             try flags.append(b.allocator, flag);

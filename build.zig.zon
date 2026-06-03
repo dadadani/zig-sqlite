@@ -1,7 +1,7 @@
 .{
     .name = .sqlite,
     .fingerprint = 0xb8bb86826b7f6417,
-    .minimum_zig_version = "0.17.0-dev.644+3de72507",
+    .minimum_zig_version = "0.17.0-dev.657+2faf8debf",
     .version = "3.48.0",
     .dependencies = .{
         .sqlite = .{
@@ -9,8 +9,8 @@
             .hash = "N-V-__8AAK_4rQDqNybRFADVHf986hCbR9ln5ez1iWpmBV5L",
         },
         .translate_c = .{
-            .url = "git+https://codeberg.org/ziglang/translate-c#e5d8d99bf27b9ae742b90bc4e2c8ff68a9bab173",
-            .hash = "translate_c-0.0.0-Q_BUWv0OBwB0EgJ9A41ljwlmyKHA-aBwbDmGWjPmR5ai",
+            .url = "git+https://codeberg.org/ziglang/translate-c#0c5f83228e149b2a7f6e1b4a473b7ceab76acc71",
+            .hash = "translate_c-0.0.0-Q_BUWmkVBwCRIkyuNtAeuC8ab55pqRi0f7tDDPbUazc3",
         },
     },
     .paths = .{"."},
