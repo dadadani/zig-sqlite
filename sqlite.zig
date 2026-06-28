@@ -234,7 +234,7 @@ pub const ThreadingMode = enum {
     /// SingleThread makes SQLite unsafe to use with more than a single thread at once.
     SingleThread,
     /// MultiThread makes SQLite safe to use with multiple threads at once provided that
-    /// a single database connection is not by more than a single thread at once.
+    /// a single database connection is not used by more than a single thread at once.
     MultiThread,
     /// Serialized makes SQLite safe to use with multiple threads at once with no restriction.
     Serialized,
