@@ -5,6 +5,33 @@
 
 pub const c = @import("libsqlite-ext");
 
+pub const sqlite3 = c.sqlite3;
+pub const sqlite3_blob = c.sqlite3_blob;
+pub const sqlite3_context = c.sqlite3_context;
+pub const sqlite3_stmt = c.sqlite3_stmt;
+pub const sqlite3_value = c.sqlite3_value;
+pub const sqlite3_api_routines = c.sqlite3_api_routines;
+
+pub const SQLITE_DETERMINISTIC = c.SQLITE_DETERMINISTIC;
+pub const SQLITE_DIRECTONLY = c.SQLITE_DIRECTONLY;
+pub const SQLITE_DONE = c.SQLITE_DONE;
+pub const SQLITE_ERROR = c.SQLITE_ERROR;
+pub const SQLITE_MISUSE = c.SQLITE_MISUSE;
+pub const SQLITE_NULL = c.SQLITE_NULL;
+pub const SQLITE_OK = c.SQLITE_OK;
+pub const SQLITE_OPEN_CREATE = c.SQLITE_OPEN_CREATE;
+pub const SQLITE_OPEN_FULLMUTEX = c.SQLITE_OPEN_FULLMUTEX;
+pub const SQLITE_OPEN_MEMORY = c.SQLITE_OPEN_MEMORY;
+pub const SQLITE_OPEN_NOMUTEX = c.SQLITE_OPEN_NOMUTEX;
+pub const SQLITE_OPEN_READONLY = c.SQLITE_OPEN_READONLY;
+pub const SQLITE_OPEN_READWRITE = c.SQLITE_OPEN_READWRITE;
+pub const SQLITE_OPEN_SHAREDCACHE = c.SQLITE_OPEN_SHAREDCACHE;
+pub const SQLITE_OPEN_URI = c.SQLITE_OPEN_URI;
+pub const SQLITE_ROW = c.SQLITE_ROW;
+pub const SQLITE_STATIC = c.SQLITE_STATIC;
+pub const SQLITE_UTF8 = c.SQLITE_UTF8;
+pub const SQLITE_VERSION_NUMBER = c.SQLITE_VERSION_NUMBER;
+
 pub const sqliteTransientAsDestructor = @import("libsqlite-workaround").sqliteTransientAsDestructor;
 
 pub var sqlite3_api: [*c]c.sqlite3_api_routines = null;

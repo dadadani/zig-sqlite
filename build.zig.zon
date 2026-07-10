@@ -2,11 +2,11 @@
     .name = .sqlite,
     .fingerprint = 0xb8bb86826b7f6417,
     .minimum_zig_version = "0.17.0-dev.1282+c0f9b51d8",
-    .version = "3.48.0",
+    .version = "3.53.3",
     .dependencies = .{
         .sqlite = .{
-            .url = "https://sqlite.org/2026/sqlite-amalgamation-3530200.zip",
-            .hash = "N-V-__8AAK_4rQDqNybRFADVHf986hCbR9ln5ez1iWpmBV5L",
+            .url = "https://sqlite.org/2026/sqlite-amalgamation-3530300.zip",
+            .hash = "N-V-__8AAE9krgByKNN5S4cuFUqn5FS8FvM4S3K1qQ-3sEHC",
         },
         .translate_c = .{
             .url = "git+https://codeberg.org/ziglang/translate-c#ba4288f6c0e8054d7894266949d4fa08bfc0212a",

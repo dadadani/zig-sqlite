@@ -9,7 +9,7 @@ const name = "zigcrypto";
 
 pub const loadable_extension = true;
 
-var module_allocator: std.heap.GeneralPurposeAllocator(.{}) = undefined;
+var module_allocator: std.heap.DebugAllocator(.{}) = .init;
 var module_context: sqlite.vtab.ModuleContext = undefined;
 
 const logger = std.log.scoped(.zigcrypto);
@@ -44,14 +44,12 @@ pub export fn sqlite3_zigcrypto_init(raw_db: *c.sqlite3, err_msg: [*c][*c]u8, ap
 
     c.sqlite3_api = api;
 
-    module_allocator = std.heap.GeneralPurposeAllocator(.{}){};
-
     var db = sqlite.Db{
         .db = raw_db,
     };
 
     createAllFunctions(&db) catch |err| {
-        logger.err("unable to create all SQLite functions, err: {!}", .{err});
+        logger.err("unable to create all SQLite functions, err: {}", .{err});
         return c.SQLITE_ERROR;
     };
 

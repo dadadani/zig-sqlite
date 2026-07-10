@@ -1,7 +1,7 @@
 const std = @import("std");
 const mem = std.mem;
 
-const c = @import("c.zig").c;
+const c = @import("c.zig").raw_c;
 const versionGreaterThanOrEqualTo = @import("c.zig").versionGreaterThanOrEqualTo;
 
 pub const SQLiteExtendedIOError = error{

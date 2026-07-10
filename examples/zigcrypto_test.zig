@@ -1,15 +1,14 @@
-const builtin = @import("builtin");
 const std = @import("std");
 const debug = std.debug;
 const mem = std.mem;
 
 const sqlite = @import("sqlite");
 
-pub fn main() anyerror!void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    var arena = std.heap.ArenaAllocator.init(gpa.allocator());
-    defer arena.deinit();
-    const allocator = arena.allocator();
+pub fn main(init: std.process.Init) anyerror!void {
+    const allocator = init.arena.allocator();
+    const args = try init.minimal.args.toSlice(allocator);
+    if (args.len != 2) return error.MissingExtensionPath;
+    const extension_path = args[1];
 
     //
 
@@ -25,16 +24,13 @@ pub fn main() anyerror!void {
     }
 
     {
-        const extension_path = if (builtin.os.tag == .windows)
-            "./zig-out/bin/zigcrypto.dll"
-        else
-            "./zig-out/lib/libzigcrypto";
-
-        var pzErrMsg: [*c]u8 = undefined;
+        var pzErrMsg: [*c]u8 = null;
         const result = sqlite.c.sqlite3_load_extension(db.db, extension_path, null, &pzErrMsg);
         if (result != sqlite.c.SQLITE_OK) {
             const err = sqlite.c.sqlite3_errstr(result);
-            std.debug.panic("unable to load extension at path {s}, err: {s}, err message: {s}\n", .{ extension_path, err, std.mem.sliceTo(pzErrMsg, 0) });
+            defer sqlite.c.sqlite3_free(pzErrMsg);
+            const message = if (pzErrMsg == null) "no error message" else std.mem.span(pzErrMsg);
+            std.debug.panic("unable to load extension at path {s}, err: {s}, err message: {s}\n", .{ extension_path, err, message });
         }
     }
 

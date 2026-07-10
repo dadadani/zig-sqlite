@@ -1,9 +1,10 @@
 const root = @import("root");
+pub const raw_c = @import("libsqlite");
 
 pub const c = if (@hasDecl(root, "loadable_extension"))
     @import("c/loadable_extension.zig")
 else
-    @import("libsqlite");
+    raw_c;
 
 pub const sqliteTransientAsDestructor = @import("libsqlite-workaround").sqliteTransientAsDestructor;
 
