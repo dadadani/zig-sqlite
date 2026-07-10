@@ -75,10 +75,10 @@ jobs:
           TMPDIR: ${{ runner.temp }}/zig-tmp
           ZIG_LOCAL_CACHE_DIR: .zig-cache
           ZIG_GLOBAL_CACHE_DIR: .zig-global-cache
-        run: zig build test --cache-dir .zig-cache --global-cache-dir .zig-global-cache -Dci=true -Din_memory=true --summary all -fqemu -fwine
+        run: zig build test --cache-dir .zig-cache -Dci=true -Din_memory=true --summary all -fqemu -fwine
       - name: Run Tests in memory
         if: ${{ matrix.os != 'ubuntu-24.04' }}
         env:
           ZIG_LOCAL_CACHE_DIR: .zig-cache
           ZIG_GLOBAL_CACHE_DIR: .zig-global-cache
-        run: zig build test --cache-dir .zig-cache --global-cache-dir .zig-global-cache -Dci=true -Din_memory=true --summary all
+        run: zig build test --cache-dir .zig-cache -Dci=true -Din_memory=true --summary all
