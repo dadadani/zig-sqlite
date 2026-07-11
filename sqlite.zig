@@ -475,24 +475,33 @@ fn isThreadSafe() bool {
 /// A Db can be opened with a file database or a in-memory database:
 ///
 ///     // File database
-///     var db = try sqlite.Db.init(.{ .mode = .{ .File = "/tmp/data.db" } });
+///     var db = try sqlite.Db.init(io, allocator, .{ .mode = .{ .File = .{ .sub_path = "data.db" } } });
 ///
 ///     // In memory database
-///     var db = try sqlite.Db.init(.{ .mode = .{ .Memory = {} } });
+///     var db = try sqlite.Db.init(io, allocator, .{ .mode = .{ .Memory = {} } });
 ///
 pub const Db = struct {
     const Self = @This();
 
     db: *c.sqlite3,
+    vfs: ?*@import("vfs.zig"),
 
     /// Mode determines how the database will be opened.
     ///
-    /// * File means opening the database at this path with sqlite3_open_v2.
+    /// * File means opening the database relative to the provided directory.
     /// * Memory means opening the database in memory.
     ///   This works by opening the :memory: path with sqlite3_open_v2 with the flag SQLITE_OPEN_MEMORY.
     pub const Mode = union(enum) {
-        File: [:0]const u8,
+        File: FileOptions,
         Memory,
+    };
+
+    pub const FileOptions = struct {
+        /// Caller-owned directory used for all database, journal, and WAL file operations.
+        /// It must remain open until Db.deinit returns.
+        dir: ?std.Io.Dir = null,
+        /// Path to the database relative to dir.
+        sub_path: [:0]const u8,
     };
 
     /// OpenFlags contains various flags used when opening a SQLite databse.
@@ -508,10 +517,12 @@ pub const Db = struct {
 
     pub const InitError = error{
         SQLiteBuildNotThreadSafe,
-    } || Error;
+        NoDefaultVfs,
+        VfsRegistrationFailed,
+    } || mem.Allocator.Error || Error;
 
     /// init creates a database with the provided options.
-    pub fn init(options: InitOptions) InitError!Self {
+    pub fn init(io_instance: std.Io, allocator: mem.Allocator, options: InitOptions) InitError!Self {
         var dummy_diags = Diagnostics{};
         var diags = options.diags orelse &dummy_diags;
 
@@ -535,43 +546,63 @@ pub const Db = struct {
             else => {},
         }
 
+        const root_dir = switch (options.mode) {
+            .File => |file| file.dir orelse std.Io.Dir.cwd(),
+            .Memory => std.Io.Dir.cwd(),
+        };
+        const zig_vfs = try @import("vfs.zig").init(io_instance, allocator, root_dir);
+        errdefer zig_vfs.deinit();
+
         switch (options.mode) {
-            .File => |path| {
+            .File => |file| {
                 var db: ?*c.sqlite3 = undefined;
-                const result = c.sqlite3_open_v2(path.ptr, &db, flags, null);
+                const result = c.sqlite3_open_v2(file.sub_path.ptr, &db, flags, zig_vfs.name.ptr);
                 if (result != c.SQLITE_OK or db == null) {
                     if (db) |v| {
                         diags.err = getLastDetailedErrorFromDb(v);
+                        _ = c.sqlite3_close(v);
                     } else {
                         diags.err = getDetailedErrorFromResultCode(result);
                     }
                     return errors.errorFromResultCode(result);
                 }
 
-                return Self{ .db = db.? };
+                return Self{ .db = db.?, .vfs = zig_vfs };
             },
             .Memory => {
                 flags |= c.SQLITE_OPEN_MEMORY;
 
                 var db: ?*c.sqlite3 = undefined;
-                const result = c.sqlite3_open_v2(":memory:", &db, flags, null);
+                const result = c.sqlite3_open_v2(":memory:", &db, flags, zig_vfs.name.ptr);
                 if (result != c.SQLITE_OK or db == null) {
                     if (db) |v| {
                         diags.err = getLastDetailedErrorFromDb(v);
+                        _ = c.sqlite3_close(v);
                     } else {
                         diags.err = getDetailedErrorFromResultCode(result);
                     }
                     return errors.errorFromResultCode(result);
                 }
 
-                return Self{ .db = db.? };
+                return Self{ .db = db.?, .vfs = zig_vfs };
             },
         }
     }
 
     /// deinit closes the database.
     pub fn deinit(self: *Self) void {
-        _ = c.sqlite3_close(self.db);
+        const zig_vfs = self.vfs orelse return;
+        while (c.sqlite3_next_stmt(self.db, null)) |stmt| {
+            _ = c.sqlite3_finalize(stmt);
+        }
+        if (c.sqlite3_close(self.db) == c.SQLITE_OK) {
+            zig_vfs.deinit();
+        }
+    }
+
+    /// Wraps a SQLite handle owned by the caller. The returned Db must not be deinitialized.
+    pub fn borrow(db: *c.sqlite3) Self {
+        return .{ .db = db, .vfs = null };
     }
 
     // getDetailedError returns the detailed error for the last API call if it failed.
@@ -3316,14 +3347,283 @@ test "sqlite: blob open, reopen" {
 test "sqlite: failing open" {
     var diags: Diagnostics = undefined;
 
-    const res = Db.init(.{
+    const res = Db.init(testing.io, testing.allocator, .{
         .diags = &diags,
         .open_flags = .{},
-        .mode = .{ .File = "/tmp/not_existing.db" },
+        .mode = .{ .File = .{ .sub_path = "not_existing.db" } },
     });
     try testing.expectError(error.SQLiteCantOpen, res);
     try testing.expectEqual(@as(usize, 14), diags.err.?.code);
     try testing.expectEqualStrings("unable to open database file", diags.err.?.message);
+}
+
+test "sqlite: registers one VFS per database" {
+    var first = try Db.init(testing.io, testing.allocator, .{});
+    var second = try Db.init(testing.io, testing.allocator, .{});
+
+    const first_name = try testing.allocator.dupeSentinel(u8, first.vfs.?.name, 0);
+    defer testing.allocator.free(first_name);
+    const second_name = try testing.allocator.dupeSentinel(u8, second.vfs.?.name, 0);
+    defer testing.allocator.free(second_name);
+
+    try testing.expect(!mem.eql(u8, first_name, second_name));
+    try testing.expect(c.sqlite3_vfs_find(first_name.ptr) != null);
+    try testing.expect(c.sqlite3_vfs_find(second_name.ptr) != null);
+
+    first.deinit();
+    try testing.expect(c.sqlite3_vfs_find(first_name.ptr) == null);
+    try testing.expect(c.sqlite3_vfs_find(second_name.ptr) != null);
+
+    second.deinit();
+    try testing.expect(c.sqlite3_vfs_find(second_name.ptr) == null);
+}
+
+test "sqlite: Zig VFS persists a database across connections" {
+    var tmp_dir = testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    {
+        var db = try Db.init(testing.io, testing.allocator, .{
+            .mode = .{ .File = .{ .dir = tmp_dir.dir, .sub_path = "database.db" } },
+            .open_flags = .{ .write = true, .create = true },
+        });
+        defer db.deinit();
+        try db.exec("CREATE TABLE value (number INTEGER)", .{}, .{});
+        try db.exec("INSERT INTO value VALUES (42)", .{}, .{});
+        try testing.expectEqual(@as(?i64, 42), try db.one(i64, "SELECT number FROM value", .{}, .{}));
+    }
+
+    {
+        var db = try Db.init(testing.io, testing.allocator, .{
+            .mode = .{ .File = .{ .dir = tmp_dir.dir, .sub_path = "database.db" } },
+        });
+        defer db.deinit();
+        try testing.expectEqual(@as(?i64, 42), try db.one(i64, "SELECT number FROM value", .{}, .{}));
+    }
+}
+
+test "sqlite: Zig VFS prevents concurrent writers" {
+    var tmp_dir = testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const options: InitOptions = .{
+        .mode = .{ .File = .{ .dir = tmp_dir.dir, .sub_path = "locking.db" } },
+        .open_flags = .{ .write = true, .create = true },
+    };
+
+    var first = try Db.init(testing.io, testing.allocator, options);
+    defer first.deinit();
+    var second = try Db.init(testing.io, testing.allocator, options);
+    defer second.deinit();
+
+    try first.exec("CREATE TABLE value (number INTEGER)", .{}, .{});
+    try first.exec("BEGIN IMMEDIATE", .{}, .{});
+    try testing.expectEqual(c.SQLITE_BUSY, c.sqlite3_exec(second.db, "BEGIN IMMEDIATE", null, null, null));
+    try first.exec("ROLLBACK", .{}, .{});
+
+    try second.exec("INSERT INTO value VALUES (42)", .{}, .{});
+    try testing.expectEqual(@as(?i64, 42), try first.one(i64, "SELECT number FROM value", .{}, .{}));
+}
+
+test "sqlite: Zig VFS coordinates path aliases" {
+    var tmp_dir = testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    var first = try Db.init(testing.io, testing.allocator, .{
+        .mode = .{ .File = .{ .dir = tmp_dir.dir, .sub_path = "alias.db" } },
+        .open_flags = .{ .write = true, .create = true },
+    });
+    defer first.deinit();
+    var second = try Db.init(testing.io, testing.allocator, .{
+        .mode = .{ .File = .{ .dir = tmp_dir.dir, .sub_path = "./alias.db" } },
+        .open_flags = .{ .write = true },
+    });
+    defer second.deinit();
+
+    try first.exec("CREATE TABLE value (number INTEGER)", .{}, .{});
+    try first.exec("BEGIN IMMEDIATE", .{}, .{});
+    try testing.expectEqual(c.SQLITE_BUSY, c.sqlite3_exec(second.db, "BEGIN IMMEDIATE", null, null, null));
+    try first.exec("ROLLBACK", .{}, .{});
+}
+
+test "sqlite: Zig VFS shares WAL state between connections" {
+    var tmp_dir = testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const options: InitOptions = .{
+        .mode = .{ .File = .{ .dir = tmp_dir.dir, .sub_path = "wal.db" } },
+        .open_flags = .{ .write = true, .create = true },
+    };
+
+    var first = try Db.init(testing.io, testing.allocator, options);
+    defer first.deinit();
+    const mode = try first.pragma([16:0]u8, .{}, "journal_mode", "wal");
+    try testing.expectEqualStrings("wal", mem.sliceTo(&mode.?, 0));
+    try first.exec("CREATE TABLE value (number INTEGER)", .{}, .{});
+
+    var second = try Db.init(testing.io, testing.allocator, options);
+    defer second.deinit();
+    try first.exec("INSERT INTO value VALUES (42)", .{}, .{});
+    try testing.expectEqual(@as(?i64, 42), try second.one(i64, "SELECT number FROM value", .{}, .{}));
+}
+
+test "sqlite: Zig VFS opens an existing WAL database read-only" {
+    var tmp_dir = testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const mode: Db.Mode = .{ .File = .{ .dir = tmp_dir.dir, .sub_path = "readonly-wal.db" } };
+
+    {
+        var db = try Db.init(testing.io, testing.allocator, .{
+            .mode = mode,
+            .open_flags = .{ .write = true, .create = true },
+        });
+        defer db.deinit();
+        _ = try db.pragma([16:0]u8, .{}, "journal_mode", "wal");
+        var persist: c_int = 1;
+        try testing.expectEqual(c.SQLITE_OK, c.sqlite3_file_control(db.db, "main", c.SQLITE_FCNTL_PERSIST_WAL, &persist));
+        try db.exec("CREATE TABLE value (number INTEGER)", .{}, .{});
+        try db.exec("INSERT INTO value VALUES (42)", .{}, .{});
+    }
+
+    {
+        var db = try Db.init(testing.io, testing.allocator, .{ .mode = mode });
+        defer db.deinit();
+        try testing.expectEqual(@as(?i64, 42), try db.one(i64, "SELECT number FROM value", .{}, .{}));
+    }
+}
+
+test "sqlite: read-only WAL requires an existing SHM file" {
+    var tmp_dir = testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const mode: Db.Mode = .{ .File = .{ .dir = tmp_dir.dir, .sub_path = "missing-shm.db" } };
+
+    {
+        var db = try Db.init(testing.io, testing.allocator, .{
+            .mode = mode,
+            .open_flags = .{ .write = true, .create = true },
+        });
+        defer db.deinit();
+        _ = try db.pragma([16:0]u8, .{}, "journal_mode", "wal");
+        var persist: c_int = 1;
+        try testing.expectEqual(c.SQLITE_OK, c.sqlite3_file_control(db.db, "main", c.SQLITE_FCNTL_PERSIST_WAL, &persist));
+        try db.exec("CREATE TABLE value (number INTEGER)", .{}, .{});
+    }
+
+    try tmp_dir.dir.deleteFile(testing.io, "missing-shm.db-shm");
+    var db = try Db.init(testing.io, testing.allocator, .{ .mode = mode });
+    defer db.deinit();
+    try testing.expectError(error.SQLiteReadOnly, db.one(i64, "SELECT count(*) FROM value", .{}, .{}));
+}
+
+test "sqlite: Zig VFS never shrinks an existing WAL index" {
+    var tmp_dir = testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const options: InitOptions = .{
+        .mode = .{ .File = .{ .dir = tmp_dir.dir, .sub_path = "wal-growth.db" } },
+        .open_flags = .{ .write = true, .create = true },
+    };
+
+    var first = try Db.init(testing.io, testing.allocator, options);
+    defer first.deinit();
+    _ = try first.pragma([16:0]u8, .{}, "journal_mode", "wal");
+    try first.exec("CREATE TABLE value (number INTEGER)", .{}, .{});
+
+    var shm = try tmp_dir.dir.openFile(testing.io, "wal-growth.db-shm", .{ .mode = .read_write });
+    defer shm.close(testing.io);
+    try shm.setLength(testing.io, 65536);
+
+    var second = try Db.init(testing.io, testing.allocator, options);
+    defer second.deinit();
+    _ = try second.one(i64, "SELECT count(*) FROM value", .{}, .{});
+
+    var db_file: ?*c.sqlite3_file = null;
+    try testing.expectEqual(c.SQLITE_OK, c.sqlite3_file_control(first.db, "main", c.SQLITE_FCNTL_FILE_POINTER, @ptrCast(&db_file)));
+    var region: ?*volatile anyopaque = null;
+    try testing.expectEqual(c.SQLITE_OK, db_file.?.pMethods.*.xShmMap.?(db_file.?, 1, 32768, 1, &region));
+    try testing.expect(region != null);
+
+    try testing.expectEqual(@as(u64, 65536), (try shm.stat(testing.io)).size);
+}
+
+test "sqlite: Zig VFS fetches database pages with mmap" {
+    var tmp_dir = testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const file_mode: Db.Mode = .{ .File = .{ .dir = tmp_dir.dir, .sub_path = "mmap.db" } };
+
+    {
+        var db = try Db.init(testing.io, testing.allocator, .{
+            .mode = file_mode,
+            .open_flags = .{ .write = true, .create = true },
+        });
+        defer db.deinit();
+        try db.exec("CREATE TABLE value (number INTEGER, padding BLOB)", .{}, .{});
+        try db.exec("INSERT INTO value VALUES (42, zeroblob(16384))", .{}, .{});
+    }
+
+    {
+        var db = try Db.init(testing.io, testing.allocator, .{ .mode = file_mode });
+        defer db.deinit();
+        _ = try db.pragma(i64, .{}, "mmap_size", "1048576");
+        try testing.expectEqual(@as(?i64, 42), try db.one(i64, "SELECT number FROM value", .{}, .{}));
+        try testing.expect(@atomicLoad(usize, &db.vfs.?.mmap_fetches, .monotonic) > 0);
+    }
+}
+
+test "sqlite: Zig VFS file controls" {
+    var tmp_dir = testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    var db = try Db.init(testing.io, testing.allocator, .{
+        .mode = .{ .File = .{ .dir = tmp_dir.dir, .sub_path = "controls.db" } },
+        .open_flags = .{ .write = true, .create = true },
+    });
+    defer db.deinit();
+
+    var lock_level: c_int = -1;
+    try testing.expectEqual(c.SQLITE_OK, c.sqlite3_file_control(db.db, "main", c.SQLITE_FCNTL_LOCKSTATE, &lock_level));
+    try testing.expectEqual(c.SQLITE_LOCK_NONE, lock_level);
+
+    var active_vfs: ?*c.sqlite3_vfs = null;
+    try testing.expectEqual(c.SQLITE_OK, c.sqlite3_file_control(db.db, "main", c.SQLITE_FCNTL_VFS_POINTER, @ptrCast(&active_vfs)));
+    try testing.expectEqual(&db.vfs.?.value, active_vfs.?);
+
+    var mmap_size: c.sqlite3_int64 = 4096;
+    try testing.expectEqual(c.SQLITE_OK, c.sqlite3_file_control(db.db, "main", c.SQLITE_FCNTL_MMAP_SIZE, &mmap_size));
+    try testing.expectEqual(@as(c.sqlite3_int64, 0), mmap_size);
+    mmap_size = -1;
+    try testing.expectEqual(c.SQLITE_OK, c.sqlite3_file_control(db.db, "main", c.SQLITE_FCNTL_MMAP_SIZE, &mmap_size));
+    try testing.expectEqual(@as(c.sqlite3_int64, 4096), mmap_size);
+
+    var persist_wal: c_int = -1;
+    try testing.expectEqual(c.SQLITE_OK, c.sqlite3_file_control(db.db, "main", c.SQLITE_FCNTL_PERSIST_WAL, &persist_wal));
+    try testing.expectEqual(@as(c_int, 0), persist_wal);
+    persist_wal = 1;
+    try testing.expectEqual(c.SQLITE_OK, c.sqlite3_file_control(db.db, "main", c.SQLITE_FCNTL_PERSIST_WAL, &persist_wal));
+    try testing.expectEqual(@as(c_int, 1), persist_wal);
+
+    var powersafe_overwrite: c_int = -1;
+    try testing.expectEqual(c.SQLITE_OK, c.sqlite3_file_control(db.db, "main", c.SQLITE_FCNTL_POWERSAFE_OVERWRITE, &powersafe_overwrite));
+    try testing.expectEqual(@as(c_int, 1), powersafe_overwrite);
+    powersafe_overwrite = 0;
+    try testing.expectEqual(c.SQLITE_OK, c.sqlite3_file_control(db.db, "main", c.SQLITE_FCNTL_POWERSAFE_OVERWRITE, &powersafe_overwrite));
+    try testing.expectEqual(@as(c_int, 0), powersafe_overwrite);
+
+    var moved: c_int = -1;
+    try testing.expectEqual(c.SQLITE_OK, c.sqlite3_file_control(db.db, "main", c.SQLITE_FCNTL_HAS_MOVED, &moved));
+    try testing.expectEqual(@as(c_int, 0), moved);
+
+    var vfs_name: [*c]u8 = null;
+    try testing.expectEqual(c.SQLITE_OK, c.sqlite3_file_control(db.db, "main", c.SQLITE_FCNTL_VFSNAME, @ptrCast(&vfs_name)));
+    defer c.sqlite3_free(vfs_name);
+    try testing.expectEqualStrings(db.vfs.?.name, std.mem.span(vfs_name));
+
+    var chunk_size: c_int = 65536;
+    try testing.expectEqual(c.SQLITE_OK, c.sqlite3_file_control(db.db, "main", c.SQLITE_FCNTL_CHUNK_SIZE, &chunk_size));
+    var size_hint: c.sqlite3_int64 = 65537;
+    try testing.expectEqual(c.SQLITE_OK, c.sqlite3_file_control(db.db, "main", c.SQLITE_FCNTL_SIZE_HINT, &size_hint));
+
+    if (builtin.os.tag == .windows) {
+        var av_retry = [2]c_int{ -1, -1 };
+        try testing.expectEqual(c.SQLITE_OK, c.sqlite3_file_control(db.db, "main", c.SQLITE_FCNTL_WIN32_AV_RETRY, &av_retry));
+        try testing.expectEqualSlices(c_int, &.{ 10, 25 }, &av_retry);
+    }
 }
 
 test "sqlite: failing prepare statement" {
@@ -4217,7 +4517,7 @@ test "fuzzing" {
     const Context = struct {
         fn testOne(_: @This(), smith: *testing.Smith) anyerror!void {
             if (smith.in) |input| {
-                var db = try Db.init(.{
+                var db = try Db.init(testing.io, testing.allocator, .{
                     .mode = .Memory,
                     .open_flags = .{
                         .write = true,

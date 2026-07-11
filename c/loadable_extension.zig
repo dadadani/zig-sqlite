@@ -11,6 +11,7 @@ pub const sqlite3_context = c.sqlite3_context;
 pub const sqlite3_stmt = c.sqlite3_stmt;
 pub const sqlite3_value = c.sqlite3_value;
 pub const sqlite3_api_routines = c.sqlite3_api_routines;
+pub const sqlite3_vfs = c.sqlite3_vfs;
 
 pub const SQLITE_DETERMINISTIC = c.SQLITE_DETERMINISTIC;
 pub const SQLITE_DIRECTONLY = c.SQLITE_DIRECTONLY;

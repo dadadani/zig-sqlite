@@ -2,22 +2,11 @@
 
 This package is a thin wrapper around [sqlite](https://sqlite.org/index.html)'s C API.
 
-_Maintainer note_: I'm currently on a break working with Zig and don't intend to work on new features for zig-sqlite.
-I will keep it updated for the latest Zig versions because that doesn't take too much of my time.
-
 # Status
 
 While the core functionality works right now, the API is still subject to changes.
 
 If you use this library, expect to have to make changes when you update the code.
-
-# Zig release support
-
-`zig-sqlite` follows Zig's release structure:
-- [master](https://github.com/vrischmann/zig-sqlite) tracks Zig master
-- [zig-0.15.1](https://github.com/vrischmann/zig-sqlite/tree/zig-0.15.1) tracks Zig 0.15.1
-
-The plan is to support releases once Zig 1.0 is released but this can still change.
 
 # Table of contents
 
@@ -105,8 +94,8 @@ const sqlite = @import("sqlite");
 You must create and initialize an instance of `sqlite.Db`:
 
 ```zig
-var db = try sqlite.Db.init(.{
-    .mode = sqlite.Db.Mode{ .File = "/home/vincent/mydata.db" },
+var db = try sqlite.Db.init(io, allocator, .{
+    .mode = .{ .File = .{ .sub_path = "mydata.db" } },
     .open_flags = .{
         .write = true,
         .create = true,
@@ -115,7 +104,7 @@ var db = try sqlite.Db.init(.{
 });
 ```
 
-The `init` method takes a `InitOptions` struct which will be used to configure sqlite.
+The `init` method takes an `std.Io`, an allocator, and an `InitOptions` struct which will be used to configure sqlite. The I/O implementation, allocator, and optional file directory must remain valid until `db.deinit()` returns. File paths are resolved relative to `.File.dir`, which defaults to `std.Io.Dir.cwd()`.
 
 Only the `mode` field is mandatory, the other fields have sane default values.
 

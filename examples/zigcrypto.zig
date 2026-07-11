@@ -44,9 +44,7 @@ pub export fn sqlite3_zigcrypto_init(raw_db: *c.sqlite3, err_msg: [*c][*c]u8, ap
 
     c.sqlite3_api = api;
 
-    var db = sqlite.Db{
-        .db = raw_db,
-    };
+    var db = sqlite.Db.borrow(raw_db);
 
     createAllFunctions(&db) catch |err| {
         logger.err("unable to create all SQLite functions, err: {}", .{err});

@@ -11,7 +11,7 @@ pub fn getTestDb() !Db {
 
     const mode = dbMode(fba.allocator());
 
-    return try Db.init(.{
+    return try Db.init(testing.io, testing.allocator, .{
         .open_flags = .{
             .write = true,
             .create = true,
@@ -22,16 +22,21 @@ pub fn getTestDb() !Db {
 
 fn tmpDbPath(allocator: mem.Allocator) ![:0]const u8 {
     const tmp_dir = testing.tmpDir(.{});
+    defer tmp_dir.dir.close(testing.io);
+    defer tmp_dir.parent_dir.close(testing.io);
 
-    const path = try std.fs.path.join(allocator, &[_][]const u8{
-        "zig-cache",
-        "tmp",
-        &tmp_dir.sub_path,
+    var path_buf: [2048]u8 = undefined;
+
+    const path_len = try std.Io.Dir.realPath(tmp_dir.dir, testing.io, &path_buf);
+
+    const tmp_path = path_buf[0..path_len];
+
+    const path = try std.fs.path.joinZ(allocator, &[_][]const u8{
+        tmp_path,
         "zig-sqlite.db",
     });
-    defer allocator.free(path);
 
-    return allocator.dupeSentinel(u8, path, 0);
+    return path;
 }
 
 fn dbMode(allocator: mem.Allocator) Db.Mode {
@@ -39,12 +44,12 @@ fn dbMode(allocator: mem.Allocator) Db.Mode {
         break :blk .{ .Memory = {} };
     } else blk: {
         if (build_options.dbfile) |dbfile| {
-            return .{ .File = allocator.dupeSentinel(u8, dbfile, 0) catch unreachable };
+            return .{ .File = .{ .sub_path = allocator.dupeSentinel(u8, dbfile, 0) catch unreachable } };
         }
 
         const path = tmpDbPath(allocator) catch unreachable;
 
-        std.fs.cwd().deleteFile(path) catch {};
-        break :blk .{ .File = path };
+        std.Io.Dir.cwd().deleteFile(testing.io, path) catch {};
+        break :blk .{ .File = .{ .sub_path = path } };
     };
 }

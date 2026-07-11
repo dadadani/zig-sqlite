@@ -12,7 +12,7 @@ pub fn main(init: std.process.Init) anyerror!void {
 
     //
 
-    var db = try sqlite.Db.init(.{
+    var db = try sqlite.Db.init(init.io, allocator, .{
         .mode = sqlite.Db.Mode{ .Memory = {} },
         .open_flags = .{ .write = true },
     });
