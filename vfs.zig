@@ -2,6 +2,11 @@ const std = @import("std");
 const c = @import("c.zig").c;
 const builtin = @import("builtin");
 
+const HMODULE = ?*anyopaque;
+extern "kernel32" fn LoadLibraryW(name: [*:0]const u16) callconv(.winapi) HMODULE;
+extern "kernel32" fn FreeLibrary(module: HMODULE) callconv(.winapi) i32;
+extern "kernel32" fn GetProcAddress(module: HMODULE, name: [*:0]const u8) callconv(.winapi) ?*anyopaque;
+
 const pending_byte: u64 = 0x40000000;
 const reserved_byte: u64 = pending_byte + 1;
 const shared_first: u64 = pending_byte + 2;
@@ -11,13 +16,13 @@ var registry_head: ?*Vfs.File = null;
 var barrier_value: u8 = 0;
 var win_av_retry_count: i32 = 10;
 var win_av_retry_delay_ms: i32 = 25;
+var initializing_vfs: ?*c.sqlite3_vfs = null;
 
 const Vfs = @This();
 
 allocator: std.mem.Allocator,
 io: std.Io,
 root_dir: std.Io.Dir,
-parent: *c.sqlite3_vfs,
 value: c.sqlite3_vfs,
 name: [:0]u8,
 dl_error: [256]u8,
@@ -101,7 +106,6 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, root_dir: std.Io.Dir) !*Vf
     const self = try allocator.create(Vfs);
     errdefer allocator.destroy(self);
 
-    const parent = c.sqlite3_vfs_find(null) orelse return error.NoDefaultVfs;
     const name = try std.fmt.allocPrintSentinel(allocator, "zig-io-{x}", .{@intFromPtr(self)}, 0);
     errdefer allocator.free(name);
 
@@ -109,14 +113,15 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, root_dir: std.Io.Dir) !*Vf
         .allocator = allocator,
         .io = io,
         .root_dir = root_dir,
-        .parent = parent,
-        .value = parent.*,
+        .value = std.mem.zeroes(c.sqlite3_vfs),
         .name = name,
         .dl_error = undefined,
         .dl_error_len = 0,
         .dl_error_guard = .init,
         .mmap_fetches = 0,
     };
+    self.value.iVersion = 2;
+    self.value.mxPathname = 4096;
     self.value.pNext = null;
     self.value.zName = name.ptr;
     self.value.szOsFile = @sizeOf(File);
@@ -133,9 +138,16 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, root_dir: std.Io.Dir) !*Vf
     self.value.xCurrentTime = currentTime;
     self.value.xCurrentTimeInt64 = currentTimeInt64;
 
+    initializing_vfs = &self.value;
+    defer initializing_vfs = null;
     const result = c.sqlite3_vfs_register(&self.value, 0);
     if (result != c.SQLITE_OK) return error.VfsRegistrationFailed;
     return self;
+}
+
+pub fn osInit() c_int {
+    const value = initializing_vfs orelse return c.SQLITE_ERROR;
+    return c.sqlite3_vfs_register(value, 1);
 }
 
 pub fn deinit(self: *Vfs) void {
@@ -1006,8 +1018,17 @@ fn currentTimeInt64(value: [*c]c.sqlite3_vfs, result: [*c]c.sqlite3_int64) callc
 
 fn dlOpen(value: [*c]c.sqlite3_vfs, filename: [*c]const u8) callconv(.c) ?*anyopaque {
     const self = fromValue(value);
-    if (builtin.os.tag == .windows) return self.parent.xDlOpen.?(self.parent, filename);
-
+    if (comptime builtin.os.tag == .windows) {
+        const wide_name = std.unicode.utf8ToUtf16LeAllocZ(self.allocator, std.mem.span(filename)) catch {
+            self.setDlError("invalid library name");
+            return null;
+        };
+        defer self.allocator.free(wide_name);
+        return LoadLibraryW(wide_name.ptr) orelse {
+            self.setDlError("LoadLibraryW failed");
+            return null;
+        };
+    }
     const library = self.allocator.create(std.DynLib) catch {
         self.setDlError("out of memory");
         return null;
@@ -1025,7 +1046,6 @@ fn dlOpen(value: [*c]c.sqlite3_vfs, filename: [*c]const u8) callconv(.c) ?*anyop
 
 fn dlError(value: [*c]c.sqlite3_vfs, out_len: c_int, out: [*c]u8) callconv(.c) void {
     const self = fromValue(value);
-    if (builtin.os.tag == .windows) return self.parent.xDlError.?(self.parent, out_len, out);
     if (out_len <= 0 or out == null) return;
     self.lockDlError();
     defer self.unlockDlError();
@@ -1035,15 +1055,21 @@ fn dlError(value: [*c]c.sqlite3_vfs, out_len: c_int, out: [*c]u8) callconv(.c) v
 }
 
 fn dlSym(value: [*c]c.sqlite3_vfs, handle: ?*anyopaque, symbol: [*c]const u8) callconv(.c) ?*const fn () callconv(.c) void {
-    const self = fromValue(value);
-    if (builtin.os.tag == .windows) return self.parent.xDlSym.?(self.parent, handle, symbol);
+    _ = value;
+    if (comptime builtin.os.tag == .windows) {
+        const address = GetProcAddress(handle, @ptrCast(symbol)) orelse return null;
+        return @ptrCast(@alignCast(address));
+    }
     const library: *std.DynLib = @ptrCast(@alignCast(handle orelse return null));
     return library.lookup(*const fn () callconv(.c) void, std.mem.span(symbol));
 }
 
 fn dlClose(value: [*c]c.sqlite3_vfs, handle: ?*anyopaque) callconv(.c) void {
     const self = fromValue(value);
-    if (builtin.os.tag == .windows) return self.parent.xDlClose.?(self.parent, handle);
+    if (comptime builtin.os.tag == .windows) {
+        _ = FreeLibrary(handle);
+        return;
+    }
     const library: *std.DynLib = @ptrCast(@alignCast(handle orelse return));
     library.close();
     self.allocator.destroy(library);

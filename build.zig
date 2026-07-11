@@ -8,22 +8,31 @@ const builtin = @import("builtin");
 
 const Translator = @import("translate_c").Translator;
 
-fn getTarget(original_target: ResolvedTarget) ResolvedTarget {
-    var tmp = original_target;
-
-    if (tmp.result.isGnuLibC()) {
-        const min_glibc_version = std.SemanticVersion{
-            .major = 2,
-            .minor = 28,
-            .patch = 0,
-        };
-        const ver = tmp.result.os.version_range.linux.glibc;
-        if (ver.order(min_glibc_version) == .lt) {
-            std.debug.panic("sqlite requires glibc version >= 2.28", .{});
-        }
+fn addLibCHeaders(b: *std.Build, mod: *std.Build.Module, target: std.Target) void {
+    const base = std.Build.LazyPath.zig_lib.path(b, "libc/include");
+    if (target.os.tag.isDarwin()) {
+        mod.addSystemIncludePath(base.path(b, "any-darwin-any"));
+        return;
+    }
+    if (target.os.tag == .windows) {
+        mod.addSystemIncludePath(base.path(b, "any-windows-any"));
+        return;
     }
 
-    return tmp;
+    const generic = if (target.isMuslLibC()) "generic-musl" else "generic-glibc";
+    const arch = if (target.isMuslLibC())
+        std.zig.target.muslArchNameHeaders(target.cpu.arch)
+    else
+        std.zig.target.glibcArchNameHeaders(target.cpu.arch);
+    const abi = if (target.isMuslLibC()) std.zig.target.muslAbiNameHeaders(target.abi) else @tagName(target.abi);
+    mod.addSystemIncludePath(base.path(b, b.fmt("{s}-{s}-{s}", .{ arch, @tagName(target.os.tag), abi })));
+    mod.addSystemIncludePath(base.path(b, generic));
+    mod.addSystemIncludePath(base.path(b, b.fmt("{s}-{s}-any", .{ std.zig.target.osArchName(&target), @tagName(target.os.tag) })));
+    mod.addSystemIncludePath(base.path(b, b.fmt("any-{s}-any", .{@tagName(target.os.tag)})));
+}
+
+fn getTarget(original_target: ResolvedTarget) ResolvedTarget {
+    return original_target;
 }
 
 const TestTarget = struct {
@@ -109,7 +118,7 @@ fn computeTestTargets(isNative: bool, ci: ?bool) ?[]const TestTarget {
 }
 
 // This creates a SQLite static library from the SQLite dependency code.
-fn makeSQLiteLib(b: *std.Build, suffix_name: []const u8, dep: *std.Build.Dependency, c_flags: []const []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, sqlite_c: enum { with, without }) *std.Build.Step.Compile {
+fn makeSQLiteLib(b: *std.Build, suffix_name: []const u8, dep: *std.Build.Dependency, c_flags: []const []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, link_libc: bool, sqlite_c: enum { with, without }) *std.Build.Step.Compile {
     const name = switch (sqlite_c) {
         .with => "lib-sqlite-with-sqlite-c",
         .without => "lib-sqlite-without-sqlite-c",
@@ -117,7 +126,7 @@ fn makeSQLiteLib(b: *std.Build, suffix_name: []const u8, dep: *std.Build.Depende
 
     const name_full = b.fmt("{s}-{s}", .{ name, suffix_name });
 
-    const mod = b.addModule(name_full, .{ .target = target, .optimize = optimize, .link_libc = true });
+    const mod = b.addModule(name_full, .{ .target = target, .optimize = optimize, .link_libc = link_libc });
     const lib = b.addLibrary(.{
         .name = "sqlite",
         .linkage = .static,
@@ -125,6 +134,7 @@ fn makeSQLiteLib(b: *std.Build, suffix_name: []const u8, dep: *std.Build.Depende
     });
     lib.root_module.addIncludePath(dep.path("./"));
     lib.root_module.addIncludePath(b.path("c"));
+    addLibCHeaders(b, lib.root_module, target.result);
     if (sqlite_c == .with) {
         lib.root_module.addCSourceFile(.{
             .file = dep.path("./sqlite3.c"),
@@ -143,6 +153,9 @@ pub fn build(b: *std.Build) !void {
     const in_memory = b.option(bool, "in_memory", "Should the tests run with sqlite in memory (default true)") orelse true;
     const dbfile = b.option([]const u8, "dbfile", "Always use this database file instead of a temporary one");
     const ci = b.option(bool, "ci", "Build and test in the CI on GitHub");
+    const load_extension = b.option(bool, "load_extension", "Enable loadable extensions (default false)") orelse false;
+    const localtime = b.option(bool, "localtime", "Enable SQLite local-time conversion (default false)") orelse false;
+    const link_libc = load_extension or localtime;
 
     const query = b.standardTargetOptionsQueryOnly(.{});
     const target = b.resolveTargetQuery(query);
@@ -152,13 +165,17 @@ pub fn build(b: *std.Build) !void {
     const sqlite_dep = b.dependency("sqlite", .{
         .target = target,
         .optimize = optimize,
+        .link_libc = false,
     });
 
     // Define C flags to use
 
     var flags: std.ArrayList([]const u8) = .empty;
     defer flags.deinit(b.allocator);
-    try flags.append(b.allocator, "-std=c99");
+    try flags.append(b.allocator, "-DSQLITE_OMIT_DESERIALIZE");
+    if (!localtime) try flags.append(b.allocator, "-DSQLITE_OMIT_LOCALTIME");
+    try flags.append(b.allocator, "-DSQLITE_ZERO_MALLOC");
+    if (!load_extension) try flags.append(b.allocator, "-DSQLITE_OMIT_LOAD_EXTENSION");
 
     inline for (comptime std.meta.fieldNames(EnableOptions)) |field| {
         const info = std.meta.fieldInfo(EnableOptions, std.meta.stringToEnum(std.meta.FieldEnum(EnableOptions), field).?);
@@ -173,7 +190,7 @@ pub fn build(b: *std.Build) !void {
             try flags.append(b.allocator, flag);
         }
     }
-    //try flags.append(b.allocator, "-DSQLITE_OS_OTHER");
+    try flags.append(b.allocator, "-DSQLITE_OS_OTHER");
 
     const c_flags = flags.items;
 
@@ -188,25 +205,28 @@ pub fn build(b: *std.Build) !void {
         .c_source_file = sqlite_dep.path("./sqlite3.h"),
         .target = target,
         .optimize = optimize,
+        .link_libc = link_libc,
     });
 
     const translator_workaround: Translator = .init(translate_c, .{
         .c_source_file = b.path("c/workaround.h"),
         .target = target,
         .optimize = optimize,
+        .link_libc = link_libc,
     });
 
     const translator_ext: Translator = .init(translate_c, .{
         .c_source_file = generated_headers.sqlite3ext_h,
         .target = target,
         .optimize = optimize,
+        .link_libc = link_libc,
     });
     translator_ext.addIncludePath(generated_headers.dir);
 
     const sqlite_lib, const sqlite_mod = blk: {
-        const lib = makeSQLiteLib(b, "lib", sqlite_dep, c_flags, target, optimize, .with);
+        const lib = makeSQLiteLib(b, "lib", sqlite_dep, c_flags, target, optimize, link_libc, .with);
 
-        const mod = b.addModule("sqlite", .{ .root_source_file = b.path("sqlite.zig"), .link_libc = true, .imports = &.{
+        const mod = b.addModule("sqlite", .{ .root_source_file = b.path("sqlite.zig"), .link_libc = link_libc, .imports = &.{
             .{
                 .name = "libsqlite",
                 .module = translator_sqlite.mod,
@@ -229,11 +249,11 @@ pub fn build(b: *std.Build) !void {
     b.installArtifact(sqlite_lib);
 
     const sqliteext_mod = blk: {
-        const lib = makeSQLiteLib(b, "lib", sqlite_dep, c_flags, target, optimize, .without);
+        const lib = makeSQLiteLib(b, "lib", sqlite_dep, c_flags, target, optimize, link_libc, .without);
 
         const mod = b.addModule("sqliteext", .{
             .root_source_file = b.path("sqlite.zig"),
-            .link_libc = true,
+            .link_libc = link_libc,
             .imports = &.{
                 .{
                     .name = "libsqlite",
@@ -280,24 +300,27 @@ pub fn build(b: *std.Build) !void {
 
         const name = b.fmt("testing{d}", .{i});
 
-        const test_sqlite_lib = makeSQLiteLib(b, name, sqlite_dep, c_flags, cross_target, optimize, .with);
+        const test_sqlite_lib = makeSQLiteLib(b, name, sqlite_dep, c_flags, cross_target, optimize, link_libc, .with);
 
         const test_translator_sqlite: Translator = .init(translate_c, .{
             .c_source_file = sqlite_dep.path("./sqlite3.h"),
             .target = cross_target,
             .optimize = optimize,
+            .link_libc = link_libc,
         });
 
         const test_translator_workaround: Translator = .init(translate_c, .{
             .c_source_file = b.path("c/workaround.h"),
             .target = cross_target,
             .optimize = optimize,
+            .link_libc = link_libc,
         });
 
         const test_translator_ext: Translator = .init(translate_c, .{
             .c_source_file = generated_headers.sqlite3ext_h,
             .target = cross_target,
             .optimize = optimize,
+            .link_libc = link_libc,
         });
         test_translator_ext.addIncludePath(generated_headers.dir);
 
@@ -306,6 +329,7 @@ pub fn build(b: *std.Build) !void {
             .optimize = optimize,
             .root_source_file = b.path("sqlite.zig"),
             .single_threaded = test_target.single_threaded,
+            .link_libc = link_libc,
             .imports = &.{
                 .{
                     .name = "libsqlite",
@@ -342,7 +366,7 @@ pub fn build(b: *std.Build) !void {
 
     // Build and execute the loadable extension test only for the selected target. Cross-target
     // library tests above still provide compile coverage for all configured test targets.
-    if (query.isNative()) {
+    if (query.isNative() and load_extension) {
         const zigcrypto = addZigcrypto(b, sqliteext_mod, target, optimize);
         const zigcrypto_test_run = addZigcryptoTestRun(b, sqlite_mod, target, optimize, zigcrypto);
         test_step.dependOn(&zigcrypto_test_run.step);

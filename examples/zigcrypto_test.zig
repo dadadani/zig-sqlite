@@ -25,7 +25,7 @@ pub fn main(init: std.process.Init) anyerror!void {
 
     {
         var pzErrMsg: [*c]u8 = null;
-        const result = sqlite.c.sqlite3_load_extension(db.db, extension_path, null, &pzErrMsg);
+        const result = sqlite.c.sqlite3_load_extension(db.db, extension_path, "sqlite3_zigcrypto_init", &pzErrMsg);
         if (result != sqlite.c.SQLITE_OK) {
             const err = sqlite.c.sqlite3_errstr(result);
             defer sqlite.c.sqlite3_free(pzErrMsg);

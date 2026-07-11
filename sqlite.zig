@@ -10,6 +10,20 @@ const testing = std.testing;
 pub const sqliteTransientAsDestructor = @import("libsqlite-workaround").sqliteTransientAsDestructor;
 
 pub const c = @import("c.zig").c;
+const sqlite_allocator = @import("sqlite_allocator.zig");
+const libc_shims = @import("libc_shims.zig");
+
+comptime {
+    _ = libc_shims;
+}
+
+pub export fn sqlite3_os_init() c_int {
+    return @import("vfs.zig").osInit();
+}
+
+pub export fn sqlite3_os_end() c_int {
+    return c.SQLITE_OK;
+}
 const versionGreaterThanOrEqualTo = @import("c.zig").versionGreaterThanOrEqualTo;
 
 pub const ParsedQuery = @import("query.zig").ParsedQuery;
@@ -467,6 +481,12 @@ pub const InitOptions = struct {
     diags: ?*Diagnostics = null,
 };
 
+/// Configures SQLite's process-global memory allocator. This must be called
+/// before the first Db.init or any other API that initializes SQLite.
+pub fn configureAllocator(allocator: mem.Allocator) sqlite_allocator.ConfigureError!void {
+    return sqlite_allocator.configure(allocator);
+}
+
 fn isThreadSafe() bool {
     return c.sqlite3_threadsafe() > 0;
 }
@@ -519,10 +539,11 @@ pub const Db = struct {
         SQLiteBuildNotThreadSafe,
         NoDefaultVfs,
         VfsRegistrationFailed,
-    } || mem.Allocator.Error || Error;
+    } || sqlite_allocator.ConfigureError || mem.Allocator.Error || Error;
 
     /// init creates a database with the provided options.
     pub fn init(io_instance: std.Io, allocator: mem.Allocator, options: InitOptions) InitError!Self {
+        try sqlite_allocator.ensureConfigured();
         var dummy_diags = Diagnostics{};
         var diags = options.diags orelse &dummy_diags;
 
