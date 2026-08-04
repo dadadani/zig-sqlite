@@ -1,2 +1,2 @@
 [tools]
-zig = "0.17.0-dev.1543+6db520a4c"
+zig = "master"
