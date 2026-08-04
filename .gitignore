@@ -11,3 +11,4 @@ zig-pkg
 .codex
 .zig-global-cache
 .direnv
+.DS_Store

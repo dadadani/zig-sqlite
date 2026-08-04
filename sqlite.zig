@@ -424,7 +424,7 @@ pub const ThreadingMode = enum {
     /// SingleThread makes SQLite unsafe to use with more than a single thread at once.
     SingleThread,
     /// MultiThread makes SQLite safe to use with multiple threads at once provided that
-    /// a single database connection is not by more than a single thread at once.
+    /// a single database connection is not used by more than a single thread at once.
     MultiThread,
     /// Serialized makes SQLite safe to use with multiple threads at once with no restriction.
     Serialized,
@@ -1682,7 +1682,7 @@ pub fn Iterator(comptime Type: type) type {
                     inline .@"struct", .@"union" => |TI| {
                         if (TI.layout == .@"packed" and !@hasField(FieldType, "readField")) {
                             //const Backing = @Type(.{ .int = .{ .signedness = .unsigned, .bits = @bitSizeOf(FieldType) } });
-                            const Backing = @Int(.signed, @bitSizeOf(FieldType));
+                            const Backing = @Int(.unsigned, @bitSizeOf(FieldType));
                             return @bitCast(self.readInt(Backing, i));
                         }
 
@@ -1914,7 +1914,7 @@ pub const DynamicStatement = struct {
                 .@"union" => |info| {
                     if (info.layout == .@"packed") {
                         //const Backing = @Type(.{ .int = .{ .signedness = .unsigned, .bits = @bitSizeOf(FieldType) } });
-                        const Backing = @Int(.signed, @bitSizeOf(FieldType));
+                        const Backing = @Int(.unsigned, @bitSizeOf(FieldType));
                         try self.bindField(Backing, options, field_name, i, @as(Backing, @bitCast(field)));
                         return;
                     }
@@ -4231,7 +4231,7 @@ test "sqlite: create aggregate function with no aggregate context" {
     var db = try getTestDb();
     defer db.deinit();
 
-    var rand = std.Random.DefaultPrng.init(@intCast((std.Io.Clock.now(.real, std.testing.io)).toSeconds()));
+    var rand = std.Random.DefaultPrng.init(@intCast((std.Io.Clock.now(.boot, std.testing.io)).toMilliseconds()));
 
     // Create an aggregate function working with a MyContext
 
@@ -4292,7 +4292,7 @@ test "sqlite: create aggregate function with an aggregate context" {
     var db = try getTestDb();
     defer db.deinit();
 
-    var rand = std.Random.DefaultPrng.init(@intCast((std.Io.Clock.now(.real, std.testing.io)).toSeconds()));
+    var rand = std.Random.DefaultPrng.init(@intCast((std.Io.Clock.now(.boot, std.testing.io)).toMilliseconds()));
 
     try db.createAggregateFunction(
         "mySum",
