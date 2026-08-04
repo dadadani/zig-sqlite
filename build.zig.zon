@@ -1,16 +1,16 @@
 .{
     .name = .sqlite,
     .fingerprint = 0xb8bb86826b7f6417,
-    .minimum_zig_version = "0.17.0-dev.1426+58a94eaae",
-    .version = "3.53.3",
+    .minimum_zig_version = "0.17.0-dev.1543+6db520a4c",
+    .version = "3.53.4",
     .dependencies = .{
         .sqlite = .{
-            .url = "https://sqlite.org/2026/sqlite-amalgamation-3530300.zip",
-            .hash = "N-V-__8AAE9krgByKNN5S4cuFUqn5FS8FvM4S3K1qQ-3sEHC",
+            .url = "https://sqlite.org/2026/sqlite-amalgamation-3530400.zip",
+            .hash = "N-V-__8AAGVtrgCcOcmjrOJnagmnRyMrcKaOo09KbU-vu8w8",
         },
         .translate_c = .{
-            .url = "git+https://codeberg.org/ziglang/translate-c#fdf7dc05aaec07c5c0f0a4bfe060acf7e483f4a3",
-            .hash = "translate_c-0.0.0-Q_BUWvo6BwAVl3qDhMeQNrgCAljvDeGUnwqpnGvB0_YM",
+            .url = "git+https://codeberg.org/ziglang/translate-c#d67f0a5821b0c5ad16f60c425ad2af3499e7995f",
+            .hash = "translate_c-0.0.0-Q_BUWho9BwAx1Nyc_gDzXBjXZg62qETbgze15f50x29Y",
         },
     },
     .paths = .{"."},
