@@ -53,11 +53,21 @@ pub const VTabDiagnostics = struct {
     allocator: mem.Allocator,
 
     error_message: []const u8 = "unknown error",
+    result: enum {
+        error_code,
+        constraint,
+    } = .error_code,
 
     pub fn setErrorMessage(self: *Self, comptime format_string: []const u8, values: anytype) void {
         self.error_message = fmt.allocPrintSentinel(self.allocator, format_string, values, 0) catch |err| switch (err) {
             error.OutOfMemory => "can't set diagnostic message, out of memory",
         };
+    }
+
+    /// Marks this failure as a constraint violation for SQLite conflict handling.
+    pub fn setConstraintErrorMessage(self: *Self, comptime format_string: []const u8, values: anytype) void {
+        self.result = .constraint;
+        self.setErrorMessage(format_string, values);
     }
 };
 
@@ -359,10 +369,40 @@ pub const FilterArg = struct {
         return result;
     }
 
+    pub fn isNull(self: FilterArg) bool {
+        return self.value == null or c.sqlite3_value_type(self.value) == c.SQLITE_NULL;
+    }
+
+    /// Returns whether SQLite omitted this unchanged column during an UPDATE.
+    pub fn noChange(self: FilterArg) bool {
+        return self.value != null and c.sqlite3_value_nochange(self.value) != 0;
+    }
+
     /// Iterates values for an IN constraint accepted with `handleInConstraint`.
     pub fn inValues(self: FilterArg) InValues {
         return .{ .value = self.value };
     }
+};
+
+/// Arguments passed to a writable virtual table's `update` method.
+pub const UpdateOperation = union(enum) {
+    delete: struct {
+        old_rowid: i64,
+    },
+    insert: struct {
+        requested_rowid: ?i64,
+        values: []const FilterArg,
+    },
+    update: struct {
+        old_rowid: i64,
+        requested_rowid: ?i64,
+        values: []const FilterArg,
+    },
+};
+
+pub const IntegrityMode = enum {
+    full,
+    quick,
 };
 
 pub const InValues = struct {
@@ -656,6 +696,10 @@ pub fn VirtualTable(
     comptime {
         validateTableType(Table);
         validateCursorType(Table);
+        const has_savepoints = helpers.hasFn(Table, "savepoint") or helpers.hasFn(Table, "release") or helpers.hasFn(Table, "rollbackTo");
+        if (has_savepoints and !helpers.hasFn(Table, "begin")) {
+            @compileError("virtual table savepoint callbacks require a begin callback");
+        }
     }
 
     const State = struct {
@@ -727,62 +771,50 @@ pub fn VirtualTable(
 
     return struct {
         const Self = @This();
+        const module_version = if (helpers.hasFn(Table, "integrity"))
+            4
+        else if (helpers.hasFn(Table, "isShadowName"))
+            3
+        else if (helpers.hasFn(Table, "savepoint") or helpers.hasFn(Table, "release") or helpers.hasFn(Table, "rollbackTo"))
+            2
+        else
+            1;
 
         pub const name = table_name;
-        pub const module = if (versionGreaterThanOrEqualTo(3, 26, 0))
-            c.sqlite3_module{
-                .iVersion = 4,
-                .xCreate = xCreate,
-                .xConnect = xConnect,
-                .xBestIndex = xBestIndex,
-                .xDisconnect = xDisconnect,
-                .xDestroy = xDestroy,
-                .xOpen = xOpen,
-                .xClose = xClose,
-                .xFilter = xFilter,
-                .xNext = xNext,
-                .xEof = xEof,
-                .xColumn = xColumn,
-                .xRowid = xRowid,
-                .xUpdate = null,
-                .xBegin = null,
-                .xSync = null,
-                .xCommit = null,
-                .xRollback = null,
-                .xFindFunction = null,
-                .xRename = null,
-                .xSavepoint = null,
-                .xRelease = null,
-                .xRollbackTo = null,
-                .xShadowName = null,
-                .xIntegrity = null,
+        pub const module = makeModule();
+
+        fn makeModule() c.sqlite3_module {
+            var result = mem.zeroes(c.sqlite3_module);
+            result.iVersion = @min(module_version, if (versionGreaterThanOrEqualTo(3, 44, 0)) 4 else if (versionGreaterThanOrEqualTo(3, 26, 0)) 3 else 2);
+            result.xCreate = xCreate;
+            result.xConnect = xConnect;
+            result.xBestIndex = xBestIndex;
+            result.xDisconnect = xDisconnect;
+            result.xDestroy = xDestroy;
+            result.xOpen = xOpen;
+            result.xClose = xClose;
+            result.xFilter = xFilter;
+            result.xNext = xNext;
+            result.xEof = xEof;
+            result.xColumn = xColumn;
+            result.xRowid = xRowid;
+            result.xUpdate = if (helpers.hasFn(Table, "update")) xUpdate else null;
+            result.xBegin = if (helpers.hasFn(Table, "begin")) xBegin else null;
+            result.xSync = if (helpers.hasFn(Table, "sync")) xSync else null;
+            result.xCommit = if (helpers.hasFn(Table, "commit")) xCommit else null;
+            result.xRollback = if (helpers.hasFn(Table, "rollback")) xRollback else null;
+            result.xRename = if (helpers.hasFn(Table, "rename")) xRename else null;
+            result.xSavepoint = if (helpers.hasFn(Table, "savepoint")) xSavepoint else null;
+            result.xRelease = if (helpers.hasFn(Table, "release")) xRelease else null;
+            result.xRollbackTo = if (helpers.hasFn(Table, "rollbackTo")) xRollbackTo else null;
+            if (@hasField(c.sqlite3_module, "xShadowName")) {
+                result.xShadowName = if (helpers.hasFn(Table, "isShadowName")) xShadowName else null;
             }
-        else
-            c.sqlite3_module{
-                .iVersion = 2,
-                .xCreate = xCreate,
-                .xConnect = xConnect,
-                .xBestIndex = xBestIndex,
-                .xDisconnect = xDisconnect,
-                .xDestroy = xDestroy,
-                .xOpen = xOpen,
-                .xClose = xClose,
-                .xFilter = xFilter,
-                .xNext = xNext,
-                .xEof = xEof,
-                .xColumn = xColumn,
-                .xRowid = xRowid,
-                .xUpdate = null,
-                .xBegin = null,
-                .xSync = null,
-                .xCommit = null,
-                .xRollback = null,
-                .xFindFunction = null,
-                .xRename = null,
-                .xSavepoint = null,
-                .xRelease = null,
-                .xRollbackTo = null,
-            };
+            if (@hasField(c.sqlite3_module, "xIntegrity")) {
+                result.xIntegrity = if (helpers.hasFn(Table, "integrity")) xIntegrity else null;
+            }
+            return result;
+        }
 
         table: Table,
 
@@ -1070,6 +1102,126 @@ pub fn VirtualTable(
 
             return c.SQLITE_OK;
         }
+
+        fn xUpdate(vtab: [*c]c.sqlite3_vtab, argc: c_int, argv: [*c]?*c.sqlite3_value, row_id_ptr: [*c]c.sqlite3_int64) callconv(.c) c_int {
+            const state: *State = @fieldParentPtr("vtab", @as(*c.sqlite3_vtab, @ptrCast(vtab)));
+            var arena = heap.ArenaAllocator.init(state.module_context.allocator);
+            defer arena.deinit();
+
+            const operation: UpdateOperation = if (argc == 1)
+                .{ .delete = .{ .old_rowid = (FilterArg{ .value = argv[0] }).as(i64) } }
+            else blk: {
+                const values = filterArgsFromCPointer(arena.allocator(), argc - 2, argv + 2) catch {
+                    setVTabError(&state.vtab, "out of memory while reading update values");
+                    return c.SQLITE_NOMEM;
+                };
+                const requested_rowid = (FilterArg{ .value = argv[1] }).as(?i64);
+                if ((FilterArg{ .value = argv[0] }).isNull()) {
+                    break :blk .{ .insert = .{ .requested_rowid = requested_rowid, .values = values } };
+                }
+                break :blk .{ .update = .{
+                    .old_rowid = (FilterArg{ .value = argv[0] }).as(i64),
+                    .requested_rowid = requested_rowid,
+                    .values = values,
+                } };
+            };
+
+            var diags = VTabDiagnostics{ .allocator = arena.allocator() };
+            const row_id = state.table.update(&diags, operation) catch {
+                setVTabError(&state.vtab, diags.error_message);
+                return if (diags.result == .constraint) c.SQLITE_CONSTRAINT else c.SQLITE_ERROR;
+            };
+            if (row_id) |value| row_id_ptr.* = value;
+            return c.SQLITE_OK;
+        }
+
+        fn xBegin(vtab: [*c]c.sqlite3_vtab) callconv(.c) c_int {
+            return callTransaction(Table.begin, vtab);
+        }
+
+        fn xSync(vtab: [*c]c.sqlite3_vtab) callconv(.c) c_int {
+            return callTransaction(Table.sync, vtab);
+        }
+
+        fn xCommit(vtab: [*c]c.sqlite3_vtab) callconv(.c) c_int {
+            return callTransaction(Table.commit, vtab);
+        }
+
+        fn xRollback(vtab: [*c]c.sqlite3_vtab) callconv(.c) c_int {
+            return callTransaction(Table.rollback, vtab);
+        }
+
+        fn callTransaction(comptime callback: anytype, vtab: [*c]c.sqlite3_vtab) c_int {
+            const state: *State = @fieldParentPtr("vtab", @as(*c.sqlite3_vtab, @ptrCast(vtab)));
+            var arena = heap.ArenaAllocator.init(state.module_context.allocator);
+            defer arena.deinit();
+            var diags = VTabDiagnostics{ .allocator = arena.allocator() };
+            callback(state.table, &diags) catch {
+                setVTabError(&state.vtab, diags.error_message);
+                return c.SQLITE_ERROR;
+            };
+            return c.SQLITE_OK;
+        }
+
+        fn xRename(vtab: [*c]c.sqlite3_vtab, new_name: [*c]const u8) callconv(.c) c_int {
+            const state: *State = @fieldParentPtr("vtab", @as(*c.sqlite3_vtab, @ptrCast(vtab)));
+            var arena = heap.ArenaAllocator.init(state.module_context.allocator);
+            defer arena.deinit();
+            var diags = VTabDiagnostics{ .allocator = arena.allocator() };
+            state.table.rename(&diags, mem.sliceTo(new_name, 0)) catch {
+                setVTabError(&state.vtab, diags.error_message);
+                return c.SQLITE_ERROR;
+            };
+            return c.SQLITE_OK;
+        }
+
+        fn xSavepoint(vtab: [*c]c.sqlite3_vtab, id: c_int) callconv(.c) c_int {
+            return callSavepoint(Table.savepoint, vtab, id);
+        }
+
+        fn xRelease(vtab: [*c]c.sqlite3_vtab, id: c_int) callconv(.c) c_int {
+            return callSavepoint(Table.release, vtab, id);
+        }
+
+        fn xRollbackTo(vtab: [*c]c.sqlite3_vtab, id: c_int) callconv(.c) c_int {
+            return callSavepoint(Table.rollbackTo, vtab, id);
+        }
+
+        fn callSavepoint(comptime callback: anytype, vtab: [*c]c.sqlite3_vtab, id: c_int) c_int {
+            const state: *State = @fieldParentPtr("vtab", @as(*c.sqlite3_vtab, @ptrCast(vtab)));
+            var arena = heap.ArenaAllocator.init(state.module_context.allocator);
+            defer arena.deinit();
+            var diags = VTabDiagnostics{ .allocator = arena.allocator() };
+            callback(state.table, &diags, @as(usize, @intCast(id))) catch {
+                setVTabError(&state.vtab, diags.error_message);
+                return c.SQLITE_ERROR;
+            };
+            return c.SQLITE_OK;
+        }
+
+        fn xShadowName(suffix: [*c]const u8) callconv(.c) c_int {
+            return if (Table.isShadowName(mem.sliceTo(suffix, 0))) 1 else 0;
+        }
+
+        fn xIntegrity(vtab: [*c]c.sqlite3_vtab, schema: [*c]const u8, table_name_ptr: [*c]const u8, flags: c_int, error_message: [*c][*c]u8) callconv(.c) c_int {
+            const state: *State = @fieldParentPtr("vtab", @as(*c.sqlite3_vtab, @ptrCast(vtab)));
+            var arena = heap.ArenaAllocator.init(state.module_context.allocator);
+            defer arena.deinit();
+            var diags = VTabDiagnostics{ .allocator = arena.allocator() };
+            const report = state.table.integrity(
+                &diags,
+                mem.sliceTo(schema, 0),
+                mem.sliceTo(table_name_ptr, 0),
+                if (flags == 0) .full else .quick,
+            ) catch {
+                setVTabError(&state.vtab, diags.error_message);
+                return c.SQLITE_ERROR;
+            };
+            if (report) |message| {
+                error_message.* = dupeToSQLiteString(message) orelse return c.SQLITE_NOMEM;
+            }
+            return c.SQLITE_OK;
+        }
     };
 }
 
@@ -1097,6 +1249,100 @@ const TestVirtualTable = struct {
     pub fn destroy(self: *TestVirtualTable) void {
         _ = self;
         test_lifecycle.destroy += 1;
+    }
+
+    pub const UpdateError = error{};
+
+    pub fn update(self: *TestVirtualTable, diags: *VTabDiagnostics, operation: UpdateOperation) UpdateError!?i64 {
+        _ = self;
+        _ = diags;
+        switch (operation) {
+            .delete => test_callbacks.deletes += 1,
+            .insert => |insert| {
+                test_callbacks.inserts += 1;
+                test_callbacks.last_value_count = insert.values.len;
+                return insert.requested_rowid orelse 900;
+            },
+            .update => |update_args| {
+                test_callbacks.updates += 1;
+                test_callbacks.last_value_count = update_args.values.len;
+            },
+        }
+        return null;
+    }
+
+    pub const TransactionError = error{};
+
+    pub fn begin(self: *TestVirtualTable, diags: *VTabDiagnostics) TransactionError!void {
+        _ = self;
+        _ = diags;
+        test_callbacks.begins += 1;
+    }
+
+    pub fn sync(self: *TestVirtualTable, diags: *VTabDiagnostics) TransactionError!void {
+        _ = self;
+        _ = diags;
+        test_callbacks.syncs += 1;
+    }
+
+    pub fn commit(self: *TestVirtualTable, diags: *VTabDiagnostics) TransactionError!void {
+        _ = self;
+        _ = diags;
+        test_callbacks.commits += 1;
+    }
+
+    pub fn rollback(self: *TestVirtualTable, diags: *VTabDiagnostics) TransactionError!void {
+        _ = self;
+        _ = diags;
+        test_callbacks.rollbacks += 1;
+    }
+
+    pub const RenameError = error{};
+
+    pub fn rename(self: *TestVirtualTable, diags: *VTabDiagnostics, new_name: []const u8) RenameError!void {
+        _ = self;
+        _ = diags;
+        test_callbacks.renames += 1;
+        test_callbacks.renamed_to_writable = mem.eql(u8, new_name, "writable_renamed");
+    }
+
+    pub const SavepointError = error{};
+
+    pub fn savepoint(self: *TestVirtualTable, diags: *VTabDiagnostics, id: usize) SavepointError!void {
+        _ = self;
+        _ = diags;
+        _ = id;
+        test_callbacks.savepoints += 1;
+    }
+
+    pub fn release(self: *TestVirtualTable, diags: *VTabDiagnostics, id: usize) SavepointError!void {
+        _ = self;
+        _ = diags;
+        _ = id;
+        test_callbacks.releases += 1;
+    }
+
+    pub fn rollbackTo(self: *TestVirtualTable, diags: *VTabDiagnostics, id: usize) SavepointError!void {
+        _ = self;
+        _ = diags;
+        _ = id;
+        test_callbacks.rollback_tos += 1;
+    }
+
+    pub fn isShadowName(suffix: []const u8) bool {
+        return mem.eql(u8, suffix, "content");
+    }
+
+    pub const IntegrityError = error{};
+
+    pub fn integrity(self: *TestVirtualTable, diags: *VTabDiagnostics, schema: []const u8, table_name_value: []const u8, mode: IntegrityMode) IntegrityError!?[]const u8 {
+        _ = self;
+        _ = diags;
+        _ = schema;
+        _ = table_name_value;
+        _ = mode;
+        test_callbacks.integrity_checks += 1;
+        return if (test_callbacks.report_corruption) "test corruption" else null;
     }
 
     pub fn init(gpa: mem.Allocator, diags: *VTabDiagnostics, args: []const ModuleArgument) InitError!*TestVirtualTable {
@@ -1177,6 +1423,13 @@ const TestVirtualTable = struct {
     pub fn buildBestIndex(self: *TestVirtualTable, diags: *VTabDiagnostics, builder: *BestIndexBuilder) BuildBestIndexError!void {
         _ = self;
         _ = diags;
+
+        test_planner.order_by_count = builder.order_by.len;
+        if (builder.order_by.len > 0) {
+            test_planner.first_order_by_column = builder.order_by[0].column;
+            test_planner.first_order_by_desc = builder.order_by[0].order == .desc;
+        }
+        test_planner.column_zero_used = builder.isColumnUsed(0);
 
         var id_str_writer = std.Io.Writer.Allocating.init(builder.allocator);
         errdefer id_str_writer.deinit();
@@ -1354,6 +1607,31 @@ var test_lifecycle = struct {
     destroy: usize = 0,
 }{};
 
+var test_callbacks = struct {
+    inserts: usize = 0,
+    updates: usize = 0,
+    deletes: usize = 0,
+    last_value_count: usize = 0,
+    begins: usize = 0,
+    syncs: usize = 0,
+    commits: usize = 0,
+    rollbacks: usize = 0,
+    savepoints: usize = 0,
+    releases: usize = 0,
+    rollback_tos: usize = 0,
+    renames: usize = 0,
+    renamed_to_writable: bool = false,
+    integrity_checks: usize = 0,
+    report_corruption: bool = false,
+}{};
+
+var test_planner = struct {
+    order_by_count: usize = 0,
+    first_order_by_column: isize = 0,
+    first_order_by_desc: bool = false,
+    column_zero_used: bool = false,
+}{};
+
 test "best index column usage follows SQLite bit positions" {
     var builder = BestIndexBuilder{
         .allocator = testing.allocator,
@@ -1368,6 +1646,13 @@ test "best index column usage follows SQLite bit positions" {
     try testing.expect(!builder.isColumnUsed(1));
     try testing.expect(builder.isColumnUsed(63));
     try testing.expect(builder.isColumnUsed(64));
+}
+
+test "virtual table derives module version and recognizes shadow names" {
+    const Module = VirtualTable("module_features", TestVirtualTable);
+    try testing.expectEqual(@as(c_int, 4), Module.module.iVersion);
+    try testing.expectEqual(@as(c_int, 1), Module.module.xShadowName.?("content"));
+    try testing.expectEqual(@as(c_int, 0), Module.module.xShadowName.?("other"));
 }
 
 test "virtual table" {
@@ -1424,6 +1709,21 @@ test "virtual table" {
     }
 }
 
+test "virtual table exposes planner inputs" {
+    var db = try getTestDb();
+    defer db.deinit();
+    var module_context = ModuleContext{ .allocator = testing.allocator };
+    try db.createVirtualTable("planner_vtab", &module_context, TestVirtualTable);
+    try db.exec("CREATE VIRTUAL TABLE planner_test USING planner_vtab(n=1)", .{}, .{});
+    test_planner = .{};
+
+    _ = try db.one([20:0]u8, "SELECT foo FROM planner_test ORDER BY bar DESC LIMIT 1", .{}, .{});
+    try testing.expectEqual(@as(usize, 1), test_planner.order_by_count);
+    try testing.expectEqual(@as(isize, 1), test_planner.first_order_by_column);
+    try testing.expect(test_planner.first_order_by_desc);
+    try testing.expect(test_planner.column_zero_used);
+}
+
 test "virtual table dispatches create and destroy separately" {
     test_lifecycle = .{};
 
@@ -1438,6 +1738,51 @@ test "virtual table dispatches create and destroy separately" {
 
     try db.exec("DROP TABLE lifecycle_test", .{}, .{});
     try testing.expectEqual(@as(usize, 1), test_lifecycle.destroy);
+}
+
+test "writable virtual table callbacks" {
+    var db = try getTestDb();
+    defer db.deinit();
+    var module_context = ModuleContext{ .allocator = testing.allocator };
+    try db.createVirtualTable("writable_vtab", &module_context, TestVirtualTable);
+    try db.exec("CREATE VIRTUAL TABLE writable USING writable_vtab(n=1)", .{}, .{});
+    test_callbacks = .{};
+
+    try db.exec("BEGIN", .{}, .{});
+    try db.exec("INSERT INTO writable(foo, bar, baz) VALUES ('new', 'row', 1)", .{}, .{});
+    try testing.expectEqual(@as(?i64, 900), try db.one(i64, "SELECT last_insert_rowid()", .{}, .{}));
+    try db.exec("SAVEPOINT vtab_savepoint", .{}, .{});
+    try db.exec("UPDATE writable SET foo = 'updated'", .{}, .{});
+    try db.exec("ROLLBACK TO vtab_savepoint", .{}, .{});
+    try db.exec("RELEASE vtab_savepoint", .{}, .{});
+    try db.exec("COMMIT", .{}, .{});
+
+    try testing.expectEqual(@as(usize, 1), test_callbacks.inserts);
+    try testing.expectEqual(@as(usize, 1), test_callbacks.updates);
+    try testing.expectEqual(@as(usize, 4), test_callbacks.last_value_count);
+    try testing.expectEqual(@as(usize, 1), test_callbacks.begins);
+    try testing.expectEqual(@as(usize, 1), test_callbacks.syncs);
+    try testing.expectEqual(@as(usize, 1), test_callbacks.commits);
+    try testing.expect(test_callbacks.savepoints > 0);
+    try testing.expect(test_callbacks.rollback_tos > 0);
+    try testing.expect(test_callbacks.releases > 0);
+
+    try db.exec("DELETE FROM writable", .{}, .{});
+    try testing.expectEqual(@as(usize, 1), test_callbacks.deletes);
+
+    try db.exec("BEGIN", .{}, .{});
+    try db.exec("INSERT INTO writable(foo, bar, baz) VALUES ('rolled', 'back', 2)", .{}, .{});
+    try db.exec("ROLLBACK", .{}, .{});
+    try testing.expectEqual(@as(usize, 1), test_callbacks.rollbacks);
+
+    try db.exec("ALTER TABLE writable RENAME TO writable_renamed", .{}, .{});
+    try testing.expectEqual(@as(usize, 1), test_callbacks.renames);
+    try testing.expect(test_callbacks.renamed_to_writable);
+
+    test_callbacks.report_corruption = true;
+    const integrity_report = try db.one([20:0]u8, "PRAGMA integrity_check", .{}, .{});
+    try testing.expectEqualStrings("test corruption", mem.sliceTo(&integrity_report.?, 0));
+    try testing.expect(test_callbacks.integrity_checks > 0);
 }
 
 test "parse module arguments" {

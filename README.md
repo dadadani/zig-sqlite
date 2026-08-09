@@ -583,6 +583,97 @@ In both cases the arguments are [sqlite3\_values](https://www.sqlite.org/c3ref/v
 * `INTEGER` values can be any Zig integer
 * `REAL` values can be any Zig float
 
+## Virtual tables
+
+Register a virtual-table module with `createVirtualTable`. The module context and its allocator must remain valid until the database is closed.
+
+```zig
+var module_context = sqlite.vtab.ModuleContext{
+    .allocator = allocator,
+};
+
+try db.createVirtualTable("series", &module_context, SeriesTable);
+try db.exec(
+    "CREATE VIRTUAL TABLE numbers USING series(start=1, stop=10)",
+    .{},
+    .{},
+);
+```
+
+A table implementation provides these methods and declarations:
+
+```zig
+pub const InitError = error{...};
+pub const BuildBestIndexError = error{...};
+pub const Cursor = SeriesCursor;
+pub const schema: [:0]const u8 = "CREATE TABLE x(value INTEGER)";
+
+pub fn init(
+    allocator: std.mem.Allocator,
+    diags: *sqlite.vtab.VTabDiagnostics,
+    args: []const sqlite.vtab.ModuleArgument,
+) InitError!*SeriesTable;
+
+pub fn deinit(self: *SeriesTable, allocator: std.mem.Allocator) void;
+pub fn buildBestIndex(
+    self: *SeriesTable,
+    diags: *sqlite.vtab.VTabDiagnostics,
+    builder: *sqlite.vtab.BestIndexBuilder,
+) BuildBestIndexError!void;
+```
+
+`schema` must contain the null-terminated `CREATE TABLE` declaration used by SQLite. `buildBestIndex` can inspect `constraints`, `order_by`, used columns, collations, constant right-hand-side values, DISTINCT mode, and IN constraints. Set constraint usage, index identifiers, ordering, cost, row estimates, and flags directly on the builder; it is finalized automatically after `buildBestIndex` returns.
+
+The cursor type supplies `init`, `deinit`, `filter`, `next`, `hasNext`, `column`, and `rowId`. Filter arguments support typed conversion with `arg.as(T)`, NULL inspection with `arg.isNull()`, and IN-list iteration with `arg.inValues()`. Column return values may be optional to produce SQL `NULL`.
+
+### Virtual table lifecycle
+
+`init` and `deinit` are the defaults for all table instances. Implement any of these optional hooks when create/connect or destroy/disconnect require different behavior:
+
+```zig
+pub fn create(allocator, diags, args) InitError!*SeriesTable;
+pub fn connect(allocator, diags, args) InitError!*SeriesTable;
+pub fn destroy(self: *SeriesTable) void;
+pub fn disconnect(self: *SeriesTable) void;
+```
+
+`destroy` runs for `DROP TABLE`; `disconnect` runs when SQLite releases a connection-local instance. Common memory cleanup still belongs in `deinit`.
+
+### Writable virtual tables
+
+Adding `update` enables INSERT, UPDATE, and DELETE. Existing read-only implementations do not need to define it.
+
+```zig
+pub const UpdateError = error{...};
+
+pub fn update(
+    self: *SeriesTable,
+    diags: *sqlite.vtab.VTabDiagnostics,
+    operation: sqlite.vtab.UpdateOperation,
+) UpdateError!?i64;
+```
+
+`UpdateOperation` is tagged as `insert`, `update`, or `delete`. Insert and update contain the requested rowid and one non-owning value per declared column. Return the generated rowid for an insert where `requested_rowid` is null; otherwise return null. Values expose `as(T)`, `isNull()`, and `noChange()` and are valid only for the duration of the callback.
+
+Writable tables can optionally participate in transactions and savepoints:
+
+```zig
+pub fn begin(self: *SeriesTable, diags: *VTabDiagnostics) TransactionError!void;
+pub fn sync(self: *SeriesTable, diags: *VTabDiagnostics) TransactionError!void;
+pub fn commit(self: *SeriesTable, diags: *VTabDiagnostics) TransactionError!void;
+pub fn rollback(self: *SeriesTable, diags: *VTabDiagnostics) TransactionError!void;
+
+pub fn savepoint(self: *SeriesTable, diags: *VTabDiagnostics, id: usize) SavepointError!void;
+pub fn release(self: *SeriesTable, diags: *VTabDiagnostics, id: usize) SavepointError!void;
+pub fn rollbackTo(self: *SeriesTable, diags: *VTabDiagnostics, id: usize) SavepointError!void;
+```
+
+The savepoint ID is assigned by SQLite and is not the SQL savepoint name. Implement `rename(self, diags, new_name)` to handle `ALTER TABLE ... RENAME TO`, including renaming any backing objects.
+
+Modules with backing shadow tables can implement `isShadowName(suffix)` to identify their module-specific suffixes. Implement `integrity(self, diags, schema, table_name, mode)` to participate in `PRAGMA integrity_check` and `quick_check`; return null for a clean table or an error report string for corruption.
+
+Callback failures can set a useful SQLite error with `diags.setErrorMessage` before returning an error. An `update` implementation should use `diags.setConstraintErrorMessage` for constraint violations so SQLite can apply its conflict policy.
+
 ## Scalar functions
 
 You can define a scalar function using `db.createScalarFunction`:
