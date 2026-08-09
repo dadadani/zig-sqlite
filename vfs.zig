@@ -57,6 +57,7 @@ const File = struct {
     chunk_size: u64,
     powersafe_overwrite: bool,
     open_read_only: u8,
+    readonly_shm: bool,
 
     fn fromBase(base: [*c]c.sqlite3_file) *File {
         return @ptrCast(@alignCast(base));
@@ -241,6 +242,7 @@ fn open(value: [*c]c.sqlite3_vfs, z_name: c.sqlite3_filename, base: [*c]c.sqlite
         .chunk_size = 0,
         .powersafe_overwrite = true,
         .open_read_only = @intFromBool(actual_flags & c.SQLITE_OPEN_READONLY != 0),
+        .readonly_shm = z_name != null and c.sqlite3_uri_boolean(z_name, "readonly_shm", 0) != 0,
     };
     registryLock(self.io);
     result.registry_next = registry_head;
@@ -417,6 +419,11 @@ fn lock(base: [*c]c.sqlite3_file, requested: c_int) callconv(.c) c_int {
     }
     if (requested == c.SQLITE_LOCK_PENDING) return c.SQLITE_OK;
 
+    // POSIX byte-range locks are process-scoped, so the OS cannot detect a
+    // shared lock held by another connection in this process. Keep PENDING
+    // while reporting the failed EXCLUSIVE upgrade.
+    if (otherLockOwner(file, c.SQLITE_LOCK_SHARED)) return c.SQLITE_BUSY;
+
     if (builtin.os.tag == .windows) unlockRange(file.file, shared_first, shared_size);
     const exclusive_result = rangeLock(file.file, .exclusive, shared_first, shared_size);
     if (exclusive_result != .acquired) {
@@ -501,7 +508,6 @@ fn localLockConflict(file: *File, requested: c_int) bool {
             if (entry.lock_level >= c.SQLITE_LOCK_RESERVED) return true;
         } else if (requested >= c.SQLITE_LOCK_PENDING) {
             if (entry.lock_level >= c.SQLITE_LOCK_RESERVED) return true;
-            if (requested == c.SQLITE_LOCK_EXCLUSIVE and entry.lock_level >= c.SQLITE_LOCK_SHARED) return true;
         }
     }
     return false;
@@ -589,7 +595,7 @@ fn ensureShm(file: *File) !*ShmNode {
 
     const path = try std.fmt.allocPrintSentinel(file.vfs.allocator, "{s}-shm", .{file.path}, 0);
     errdefer file.vfs.allocator.free(path);
-    var read_only = file.open_read_only != 0;
+    var read_only = file.open_read_only != 0 or file.readonly_shm;
     const shm_file = if (read_only)
         try file.vfs.root_dir.openFile(file.vfs.io, path, .{ .mode = .read_only })
     else
@@ -926,17 +932,10 @@ fn delete(value: [*c]c.sqlite3_vfs, z_name: [*c]const u8, sync_dir: c_int) callc
         break;
     }
     if (sync_dir != 0) {
-        if (std.fs.path.dirname(path)) |parent_path| {
-            const directory_file = self.root_dir.openFile(self.io, parent_path, .{ .allow_directory = true }) catch return c.SQLITE_IOERR_DIR_FSYNC;
-            defer directory_file.close(self.io);
-            directory_file.sync(self.io) catch return c.SQLITE_IOERR_DIR_FSYNC;
-        } else {
-            const directory_file: std.Io.File = .{
-                .handle = self.root_dir.handle,
-                .flags = .{ .nonblocking = false },
-            };
-            directory_file.sync(self.io) catch return c.SQLITE_IOERR_DIR_FSYNC;
-        }
+        const parent_path = std.fs.path.dirname(path) orelse ".";
+        const directory_file = self.root_dir.openFile(self.io, parent_path, .{ .allow_directory = true }) catch return c.SQLITE_IOERR_DIR_FSYNC;
+        defer directory_file.close(self.io);
+        directory_file.sync(self.io) catch return c.SQLITE_IOERR_DIR_FSYNC;
     }
     return c.SQLITE_OK;
 }
@@ -955,7 +954,10 @@ fn retryWindowsIo(vfs: *Vfs, err: anyerror, retries: *u32) bool {
 
 fn access(value: [*c]c.sqlite3_vfs, z_name: [*c]const u8, flags: c_int, result: [*c]c_int) callconv(.c) c_int {
     const self = fromValue(value);
-    const path = self.relativePath(std.mem.span(z_name)) orelse return c.SQLITE_IOERR_ACCESS;
+    const path = self.relativePath(std.mem.span(z_name)) orelse {
+        result.* = 0;
+        return c.SQLITE_OK;
+    };
     const options: std.Io.Dir.AccessOptions = switch (flags) {
         c.SQLITE_ACCESS_READWRITE => .{ .read = true, .write = true },
         c.SQLITE_ACCESS_READ => .{ .read = true },

@@ -3445,6 +3445,35 @@ test "sqlite: Zig VFS prevents concurrent writers" {
     try testing.expectEqual(@as(?i64, 42), try first.one(i64, "SELECT number FROM value", .{}, .{}));
 }
 
+test "sqlite: failed exclusive lock retains pending lock" {
+    var tmp_dir = testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const options: InitOptions = .{
+        .mode = .{ .File = .{ .dir = tmp_dir.dir, .sub_path = "pending.db" } },
+        .open_flags = .{ .write = true, .create = true },
+    };
+
+    var writer = try Db.init(testing.io, testing.allocator, options);
+    defer writer.deinit();
+    var reader = try Db.init(testing.io, testing.allocator, options);
+    defer reader.deinit();
+    var new_reader = try Db.init(testing.io, testing.allocator, options);
+    defer new_reader.deinit();
+
+    try writer.exec("CREATE TABLE value (number INTEGER)", .{}, .{});
+    try writer.exec("INSERT INTO value VALUES (1)", .{}, .{});
+    try reader.exec("BEGIN", .{}, .{});
+    _ = try reader.one(i64, "SELECT number FROM value", .{}, .{});
+
+    try writer.exec("BEGIN IMMEDIATE", .{}, .{});
+    try writer.exec("UPDATE value SET number = 2", .{}, .{});
+    try testing.expectEqual(c.SQLITE_BUSY, c.sqlite3_exec(writer.db, "COMMIT", null, null, null));
+    try testing.expectEqual(c.SQLITE_BUSY, c.sqlite3_exec(new_reader.db, "SELECT number FROM value", null, null, null));
+
+    try reader.exec("ROLLBACK", .{}, .{});
+    try writer.exec("COMMIT", .{}, .{});
+}
+
 test "sqlite: Zig VFS coordinates path aliases" {
     var tmp_dir = testing.tmpDir(.{});
     defer tmp_dir.cleanup();
