@@ -18,6 +18,7 @@ pub fn setResult(ctx: ?*c.sqlite3_context, result: anytype) void {
         Text => c.sqlite3_result_text(ctx, result.data.ptr, @intCast(result.data.len), sqliteTransientAsDestructor()),
         Blob => c.sqlite3_result_blob(ctx, result.data.ptr, @intCast(result.data.len), sqliteTransientAsDestructor()),
         else => switch (@typeInfo(ResultType)) {
+            .optional => if (result) |value| setResult(ctx, value) else c.sqlite3_result_null(ctx),
             .int => |info| if ((info.bits + if (info.signedness == .unsigned) 1 else 0) <= 32) {
                 c.sqlite3_result_int(ctx, result);
             } else if ((info.bits + if (info.signedness == .unsigned) 1 else 0) <= 64) {
@@ -51,6 +52,15 @@ pub fn setTypeFromValue(comptime ArgType: type, arg: *ArgType, sqlite_value: *c.
         Text => arg.*.data = sliceFromValue(sqlite_value),
         Blob => arg.*.data = sliceFromValue(sqlite_value),
         else => switch (@typeInfo(ArgType)) {
+            .optional => |optional| {
+                if (c.sqlite3_value_type(sqlite_value) == c.SQLITE_NULL) {
+                    arg.* = null;
+                } else {
+                    var value: optional.child = undefined;
+                    setTypeFromValue(optional.child, &value, sqlite_value);
+                    arg.* = value;
+                }
+            },
             .int => |info| if ((info.bits + if (info.signedness == .unsigned) 1 else 0) <= 32) {
                 const value = c.sqlite3_value_int(sqlite_value);
                 arg.* = @intCast(value);

@@ -32,13 +32,18 @@ pub const ModuleContext = struct {
     allocator: mem.Allocator,
 };
 
-fn dupeToSQLiteString(s: []const u8) [*c]u8 {
-    var buffer: [*c]u8 = @ptrCast(c.sqlite3_malloc(@intCast(s.len + 1)));
+fn dupeToSQLiteString(s: []const u8) ?[*c]u8 {
+    const raw_buffer = c.sqlite3_malloc(@intCast(s.len + 1)) orelse return null;
+    const buffer: [*c]u8 = @ptrCast(raw_buffer);
 
     mem.copyForwards(u8, buffer[0..s.len], s);
     buffer[s.len] = 0;
 
     return buffer;
+}
+
+fn setVTabError(vtab: *c.sqlite3_vtab, message: []const u8) void {
+    vtab.zErrMsg = dupeToSQLiteString(message) orelse null;
 }
 
 /// VTabDiagnostics is used by the user to report error diagnostics to the virtual table.
@@ -79,6 +84,7 @@ pub const BestIndexBuilder = struct {
             is,
             limit,
             offset,
+            custom,
         }
     else
         enum {
@@ -96,6 +102,7 @@ pub const BestIndexBuilder = struct {
             is_not_null,
             is_null,
             is,
+            custom,
         };
 
     const ConstraintOpFromCodeError = error{
@@ -126,7 +133,7 @@ pub const BestIndexBuilder = struct {
             c.SQLITE_INDEX_CONSTRAINT_ISNOTNULL => return .is_not_null,
             c.SQLITE_INDEX_CONSTRAINT_ISNULL => return .is_null,
             c.SQLITE_INDEX_CONSTRAINT_IS => return .is,
-            else => return error.InvalidCode,
+            else => return .custom,
         }
     }
 
@@ -135,6 +142,8 @@ pub const BestIndexBuilder = struct {
         // Column constrained. -1 for ROWID
         column: isize,
         op: ConstraintOp,
+        /// Original SQLite operator code, including application-defined operators.
+        op_code: u8,
         usable: bool,
 
         usage: struct {
@@ -147,7 +156,8 @@ pub const BestIndexBuilder = struct {
 
     // ORDER BY clause
     pub const OrderBy = struct {
-        column: usize,
+        /// Column number, or -1 for rowid.
+        column: isize,
         order: enum {
             desc,
             asc,
@@ -163,6 +173,9 @@ pub const BestIndexBuilder = struct {
     /// Similar to `aConstraint` in the Inputs section of sqlite3_index_info except we embed the constraint usage in there too.
     /// This makes it nicer to use for the user.
     constraints: []Constraint,
+
+    /// List of ORDER BY terms requested by the statement.
+    order_by: []OrderBy,
 
     /// Indicate which columns of the virtual table are actually used by the statement.
     /// If the lowest bit of colUsed is set, that means that the first column is used.
@@ -210,6 +223,7 @@ pub const BestIndexBuilder = struct {
             .allocator = allocator,
             .index_info = index_info,
             .constraints = try allocator.alloc(Constraint, @intCast(index_info.nConstraint)),
+            .order_by = try allocator.alloc(OrderBy, @intCast(index_info.nOrderBy)),
             .columns_used = @intCast(index_info.colUsed),
             .id = .{},
         };
@@ -219,23 +233,66 @@ pub const BestIndexBuilder = struct {
 
             constraint.column = @intCast(raw_constraint.iColumn);
             constraint.op = try constraintOpFromCode(raw_constraint.op);
+            constraint.op_code = raw_constraint.op;
             constraint.usable = if (raw_constraint.usable == 1) true else false;
             constraint.usage = .{};
+        }
+
+        for (res.order_by, 0..) |*order_by, i| {
+            const raw_order_by = index_info.aOrderBy[i];
+            order_by.* = .{
+                .column = @intCast(raw_order_by.iColumn),
+                .order = if (raw_order_by.desc == 0) .asc else .desc,
+            };
         }
 
         return res;
     }
 
     /// Returns true if the column is used, false otherwise.
-    pub fn isColumnUsed(self: *Self, column: u6) bool {
-        const mask = @as(u64, 1) << column - 1;
+    pub fn isColumnUsed(self: *const Self, column: usize) bool {
+        const bit: u6 = @intCast(@min(column, 63));
+        const mask = @as(u64, 1) << bit;
         return self.columns_used & mask == mask;
+    }
+
+    /// Returns the collation SQLite will use for a constraint.
+    pub fn constraintCollation(self: *const Self, constraint_index: usize) []const u8 {
+        debug.assert(constraint_index < self.constraints.len);
+        const value = c.sqlite3_vtab_collation(self.index_info, @intCast(constraint_index));
+        return if (value == null) "BINARY" else mem.sliceTo(value, 0);
+    }
+
+    /// Returns a constant right-hand-side value when SQLite can determine one.
+    pub fn constraintRhsValue(self: *const Self, constraint_index: usize) ?FilterArg {
+        debug.assert(constraint_index < self.constraints.len);
+        var value: ?*c.sqlite3_value = null;
+        if (c.sqlite3_vtab_rhs_value(self.index_info, @intCast(constraint_index), &value) != c.SQLITE_OK) return null;
+        return .{ .value = value };
+    }
+
+    pub const DistinctMode = enum(c_int) {
+        none = 0,
+        unordered = 1,
+        ordered = 2,
+        unique = 3,
+    };
+
+    /// Describes how SQLite intends to process DISTINCT or GROUP BY.
+    pub fn distinctMode(self: *const Self) DistinctMode {
+        return @fromBackingInt(@intCast(c.sqlite3_vtab_distinct(self.index_info)));
+    }
+
+    /// Returns whether this is an IN constraint and optionally asks SQLite to pass the full list to xFilter.
+    pub fn handleInConstraint(self: *Self, constraint_index: usize, handle: bool) bool {
+        debug.assert(constraint_index < self.constraints.len);
+        return c.sqlite3_vtab_in(self.index_info, @intCast(constraint_index), if (handle) 1 else -1) != 0;
     }
 
     /// Builds the final index data.
     ///
     /// Internally it populates the sqlite3_index_info "Outputs" fields using the information set by the user.
-    pub fn build(self: *Self) void {
+    pub fn build(self: *Self) error{OutOfMemory}!void {
         var index_info = self.index_info;
 
         // Populate the constraint usage
@@ -249,10 +306,7 @@ pub const BestIndexBuilder = struct {
         index_info.idxNum = @intCast(self.id.num);
         if (self.id.str.len > 0) {
             // Must always be NULL-terminated so add 1
-            const tmp: [*c]u8 = @ptrCast(c.sqlite3_malloc(@intCast(self.id.str.len + 1)));
-
-            mem.copyForwards(u8, tmp[0..self.id.str.len], self.id.str);
-            tmp[self.id.str.len] = 0;
+            const tmp = dupeToSQLiteString(self.id.str) orelse return error.OutOfMemory;
 
             index_info.idxStr = tmp;
             index_info.needToFreeIdxStr = 1;
@@ -295,10 +349,36 @@ pub const FilterArg = struct {
     value: ?*c.sqlite3_value,
 
     pub fn as(self: FilterArg, comptime Type: type) Type {
+        const sqlite_value = self.value orelse {
+            if (@typeInfo(Type) == .optional) return null;
+            unreachable;
+        };
         var result: Type = undefined;
-        helpers.setTypeFromValue(Type, &result, self.value.?);
+        helpers.setTypeFromValue(Type, &result, sqlite_value);
 
         return result;
+    }
+
+    /// Iterates values for an IN constraint accepted with `handleInConstraint`.
+    pub fn inValues(self: FilterArg) InValues {
+        return .{ .value = self.value };
+    }
+};
+
+pub const InValues = struct {
+    value: ?*c.sqlite3_value,
+    current: ?*c.sqlite3_value = null,
+    started: bool = false,
+
+    pub fn next(self: *InValues) ?FilterArg {
+        const result = if (self.started)
+            c.sqlite3_vtab_in_next(self.value, &self.current)
+        else blk: {
+            self.started = true;
+            break :blk c.sqlite3_vtab_in_first(self.value, &self.current);
+        };
+        if (result != c.SQLITE_OK) return null;
+        return .{ .value = self.current };
     }
 };
 
@@ -396,7 +476,7 @@ fn validateCursorType(comptime Table: type) void {
         }
 
         const error_message =
-            \\the Cursor.filter function must have the signature `fn filter(cursor: *Cursor, diags: *sqlite.vtab.VTabDiagnostics, index: sqlite.vtab.IndexIdentifier, args: []FilterArg) FilterError!bool`
+            \\the Cursor.filter function must have the signature `fn filter(cursor: *Cursor, diags: *sqlite.vtab.VTabDiagnostics, index: sqlite.vtab.IndexIdentifier, args: []FilterArg) FilterError!void`
         ;
 
         if (!comptime helpers.hasFn(Cursor, "filter")) {
@@ -617,11 +697,14 @@ pub fn VirtualTable(
         module_context: *ModuleContext,
         /// The table is the actual virtual table implementation.
         table: *Table,
+        state: *State,
         cursor: *Table.Cursor,
 
         const InitError = error{} || mem.Allocator.Error || Table.Cursor.InitError;
 
-        fn init(module_context: *ModuleContext, table: *Table) InitError!*Self {
+        fn init(state: *State) InitError!*Self {
+            const module_context = state.module_context;
+            const table = state.table;
             const res = try module_context.allocator.create(Self);
             errdefer module_context.allocator.destroy(res);
 
@@ -629,6 +712,7 @@ pub fn VirtualTable(
                 .vtab_cursor = mem.zeroes(c.sqlite3_vtab_cursor),
                 .module_context = module_context,
                 .table = table,
+                .state = state,
                 .cursor = try Table.Cursor.init(module_context.allocator, table),
             };
 
@@ -647,12 +731,12 @@ pub fn VirtualTable(
         pub const name = table_name;
         pub const module = if (versionGreaterThanOrEqualTo(3, 26, 0))
             c.sqlite3_module{
-                .iVersion = 0,
-                .xCreate = xConnect, // TODO(vincent): implement xCreate and use it
+                .iVersion = 4,
+                .xCreate = xCreate,
                 .xConnect = xConnect,
                 .xBestIndex = xBestIndex,
                 .xDisconnect = xDisconnect,
-                .xDestroy = xDisconnect, // TODO(vincent): implement xDestroy and use it
+                .xDestroy = xDestroy,
                 .xOpen = xOpen,
                 .xClose = xClose,
                 .xFilter = xFilter,
@@ -675,12 +759,12 @@ pub fn VirtualTable(
             }
         else
             c.sqlite3_module{
-                .iVersion = 0,
-                .xCreate = xConnect, // TODO(vincent): implement xCreate and use it
+                .iVersion = 2,
+                .xCreate = xCreate,
                 .xConnect = xConnect,
                 .xBestIndex = xBestIndex,
                 .xDisconnect = xDisconnect,
-                .xDestroy = xDisconnect, // TODO(vincent): implement xDestroy and use it
+                .xDestroy = xDestroy,
                 .xOpen = xOpen,
                 .xClose = xClose,
                 .xFilter = xFilter,
@@ -706,30 +790,27 @@ pub fn VirtualTable(
             return @ptrCast(@alignCast(ptr.?));
         }
 
-        fn createState(allocator: mem.Allocator, diags: *VTabDiagnostics, module_context: *ModuleContext, args: []const ModuleArgument) !*State {
-            // The Context holds the complete of the virtual table and lives for its entire lifetime.
-            // Context.deinit() will be called when xDestroy is called.
-
-            var table = try Table.init(allocator, diags, args);
+        fn createState(comptime create: bool, allocator: mem.Allocator, diags: *VTabDiagnostics, module_context: *ModuleContext, args: []const ModuleArgument) !*State {
+            const table = if (comptime create and helpers.hasFn(Table, "create"))
+                try Table.create(allocator, diags, args)
+            else if (comptime !create and helpers.hasFn(Table, "connect"))
+                try Table.connect(allocator, diags, args)
+            else
+                try Table.init(allocator, diags, args);
             errdefer table.deinit(allocator);
 
             return try State.init(module_context, table);
         }
 
-        fn xCreate(db: ?*c.sqlite3, module_context_ptr: ?*anyopaque, argc: c_int, argv: [*c]const [*c]const u8, vtab: [*c][*c]c.sqlite3_vtab, err_str: [*c][*c]const u8) callconv(.c) c_int {
-            _ = db;
-            _ = module_context_ptr;
-            _ = argc;
-            _ = argv;
-            _ = vtab;
-            _ = err_str;
-
-            debug.print("xCreate\n", .{});
-
-            return c.SQLITE_ERROR;
+        fn xCreate(db: ?*c.sqlite3, module_context_ptr: ?*anyopaque, argc: c_int, argv: [*c]const [*c]const u8, vtab: [*c][*c]c.sqlite3_vtab, err_str: [*c][*c]u8) callconv(.c) c_int {
+            return createOrConnect(true, db, module_context_ptr, argc, argv, vtab, err_str);
         }
 
         fn xConnect(db: ?*c.sqlite3, module_context_ptr: ?*anyopaque, argc: c_int, argv: [*c]const [*c]const u8, vtab: [*c][*c]c.sqlite3_vtab, err_str: [*c][*c]u8) callconv(.c) c_int {
+            return createOrConnect(false, db, module_context_ptr, argc, argv, vtab, err_str);
+        }
+
+        fn createOrConnect(comptime create: bool, db: ?*c.sqlite3, module_context_ptr: ?*anyopaque, argc: c_int, argv: [*c]const [*c]const u8, vtab: [*c][*c]c.sqlite3_vtab, err_str: [*c][*c]u8) c_int {
             const module_context = getModuleContext(module_context_ptr);
 
             var arena = heap.ArenaAllocator.init(module_context.allocator);
@@ -737,8 +818,8 @@ pub fn VirtualTable(
 
             // Convert the C-like args to more idiomatic types.
             const args = parseModuleArguments(arena.allocator(), argc, argv) catch {
-                err_str.* = dupeToSQLiteString("out of memory");
-                return c.SQLITE_ERROR;
+                err_str.* = dupeToSQLiteString("out of memory") orelse null;
+                return c.SQLITE_NOMEM;
             };
 
             //
@@ -746,15 +827,17 @@ pub fn VirtualTable(
             //
 
             var diags = VTabDiagnostics{ .allocator = arena.allocator() };
-            const state = createState(module_context.allocator, &diags, module_context, args) catch {
-                err_str.* = dupeToSQLiteString(diags.error_message);
+            const state = createState(create, module_context.allocator, &diags, module_context, args) catch {
+                err_str.* = dupeToSQLiteString(diags.error_message) orelse null;
                 return c.SQLITE_ERROR;
             };
             vtab.* = @ptrCast(state);
 
             const res = c.sqlite3_declare_vtab(db, @ptrCast(state.table.schema));
             if (res != c.SQLITE_OK) {
-                return c.SQLITE_ERROR;
+                vtab.* = null;
+                state.deinit();
+                return res;
             }
 
             return c.SQLITE_OK;
@@ -774,13 +857,19 @@ pub fn VirtualTable(
 
             var builder = BestIndexBuilder.init(arena.allocator(), index_info) catch |err| {
                 logger.err("unable to create best index builder, err: {}", .{err});
+                setVTabError(&state.vtab, "unable to inspect query constraints");
                 return c.SQLITE_ERROR;
             };
 
             var diags = VTabDiagnostics{ .allocator = arena.allocator() };
             state.table.buildBestIndex(&diags, &builder) catch |err| {
                 logger.err("unable to build best index, err: {}", .{err});
+                setVTabError(&state.vtab, diags.error_message);
                 return c.SQLITE_ERROR;
+            };
+            builder.build() catch {
+                setVTabError(&state.vtab, "out of memory while building query plan");
+                return c.SQLITE_NOMEM;
             };
 
             return c.SQLITE_OK;
@@ -789,24 +878,25 @@ pub fn VirtualTable(
         fn xDisconnect(vtab: [*c]c.sqlite3_vtab) callconv(.c) c_int {
             const state: *State = @fieldParentPtr("vtab", @as(*c.sqlite3_vtab, @ptrCast(vtab)));
 
+            if (comptime helpers.hasFn(Table, "disconnect")) state.table.disconnect();
             state.deinit();
 
             return c.SQLITE_OK;
         }
 
         fn xDestroy(vtab: [*c]c.sqlite3_vtab) callconv(.c) c_int {
-            _ = vtab;
-
-            debug.print("xDestroy\n", .{});
-
-            return c.SQLITE_ERROR;
+            const state: *State = @fieldParentPtr("vtab", @as(*c.sqlite3_vtab, @ptrCast(vtab)));
+            if (comptime helpers.hasFn(Table, "destroy")) state.table.destroy();
+            state.deinit();
+            return c.SQLITE_OK;
         }
 
         fn xOpen(vtab: [*c]c.sqlite3_vtab, vtab_cursor: [*c][*c]c.sqlite3_vtab_cursor) callconv(.c) c_int {
             const state: *State = @fieldParentPtr("vtab", @as(*c.sqlite3_vtab, @ptrCast(vtab)));
 
-            const cursor_state = CursorState.init(state.module_context, state.table) catch |err| {
+            const cursor_state = CursorState.init(state) catch |err| {
                 logger.err("unable to create cursor state, err: {}", .{err});
+                setVTabError(&state.vtab, "unable to create virtual table cursor");
                 return c.SQLITE_ERROR;
             };
             vtab_cursor.* = @ptrCast(cursor_state);
@@ -835,6 +925,8 @@ pub fn VirtualTable(
             var diags = VTabDiagnostics{ .allocator = arena.allocator() };
             const has_next = cursor.hasNext(&diags) catch {
                 logger.err("unable to call Table.Cursor.hasNext: {s}", .{diags.error_message});
+                // xEof has no error return, so retain the diagnostic and stop iteration.
+                setVTabError(&cursor_state.state.vtab, diags.error_message);
                 return 1;
             };
 
@@ -875,12 +967,14 @@ pub fn VirtualTable(
 
             const args = filterArgsFromCPointer(arena.allocator(), argc, argv) catch |err| {
                 logger.err("unable to create filter args, err: {}", .{err});
+                setVTabError(&cursor_state.state.vtab, "out of memory while reading filter arguments");
                 return c.SQLITE_ERROR;
             };
 
             var diags = VTabDiagnostics{ .allocator = arena.allocator() };
             cursor.filter(&diags, id, args) catch {
                 logger.err("unable to call Table.Cursor.filter: {s}", .{diags.error_message});
+                setVTabError(&cursor_state.state.vtab, diags.error_message);
                 return c.SQLITE_ERROR;
             };
 
@@ -901,6 +995,7 @@ pub fn VirtualTable(
             var diags = VTabDiagnostics{ .allocator = arena.allocator() };
             cursor.next(&diags) catch {
                 logger.err("unable to call Table.Cursor.next: {s}", .{diags.error_message});
+                setVTabError(&cursor_state.state.vtab, diags.error_message);
                 return c.SQLITE_ERROR;
             };
 
@@ -921,6 +1016,7 @@ pub fn VirtualTable(
             var diags = VTabDiagnostics{ .allocator = arena.allocator() };
             const column = cursor.column(&diags, @intCast(n)) catch {
                 logger.err("unable to call Table.Cursor.column: {s}", .{diags.error_message});
+                setVTabError(&cursor_state.state.vtab, diags.error_message);
                 return c.SQLITE_ERROR;
             };
 
@@ -966,6 +1062,7 @@ pub fn VirtualTable(
             var diags = VTabDiagnostics{ .allocator = arena.allocator() };
             const row_id = cursor.rowId(&diags) catch {
                 logger.err("unable to call Table.Cursor.rowId: {s}", .{diags.error_message});
+                setVTabError(&cursor_state.state.vtab, diags.error_message);
                 return c.SQLITE_ERROR;
             };
 
@@ -991,6 +1088,16 @@ const TestVirtualTable = struct {
     schema: [:0]const u8,
 
     pub const InitError = error{} || mem.Allocator.Error || fmt.ParseIntError;
+
+    pub fn create(gpa: mem.Allocator, diags: *VTabDiagnostics, args: []const ModuleArgument) InitError!*TestVirtualTable {
+        test_lifecycle.create += 1;
+        return init(gpa, diags, args);
+    }
+
+    pub fn destroy(self: *TestVirtualTable) void {
+        _ = self;
+        test_lifecycle.destroy += 1;
+    }
 
     pub fn init(gpa: mem.Allocator, diags: *VTabDiagnostics, args: []const ModuleArgument) InitError!*TestVirtualTable {
         var arena = heap.ArenaAllocator.init(gpa);
@@ -1048,7 +1155,7 @@ const TestVirtualTable = struct {
 
         // Build the schema
         res.schema = try allocator.dupeSentinel(u8,
-            \\CREATE TABLE foobar(foo TEXT, bar TEXT, baz INTEGER)
+            \\CREATE TABLE foobar(foo TEXT, bar TEXT, baz INTEGER, nullable_value INTEGER)
         , 0);
 
         res.arena_state = arena.state;
@@ -1088,8 +1195,6 @@ const TestVirtualTable = struct {
         builder.id.str = try id_str_writer.toOwnedSlice();
         builder.estimated_cost = 200;
         builder.estimated_rows = 200;
-
-        builder.build();
     }
 
     /// An iterator over the rows of this table capable of applying filters.
@@ -1119,18 +1224,18 @@ const TestVirtualTable = struct {
         }
 
         fn next(it: *Iterator) void {
-            const foo = it.filters.foo orelse "";
-            const bar = it.filters.bar orelse "";
-
             it.pos += 1;
+            it.seekToMatch();
+        }
 
-            while (it.pos < it.rows.len) : (it.pos += 1) {
-                const row = it.rows[it.pos];
+        fn seekToMatch(it: *Iterator) void {
+            while (it.pos < it.rows.len and !it.matches(it.rows[it.pos])) : (it.pos += 1) {}
+        }
 
-                if (foo.len > 0 and bar.len > 0 and mem.eql(u8, foo, row.foo) and mem.eql(u8, bar, row.bar)) break;
-                if (foo.len > 0 and mem.eql(u8, foo, row.foo)) break;
-                if (bar.len > 0 and mem.eql(u8, bar, row.bar)) break;
-            }
+        fn matches(it: *const Iterator, row: Row) bool {
+            if (it.filters.foo) |foo| if (!mem.eql(u8, foo, row.foo)) return false;
+            if (it.filters.bar) |bar| if (!mem.eql(u8, bar, row.bar)) return false;
+            return true;
         }
     };
 };
@@ -1182,15 +1287,18 @@ const TestVirtualTableCursor = struct {
             //
 
             if (col == 0) {
-                cursor.iterator.filters.foo = arg.as([]const u8);
+                cursor.iterator.filters.foo = arg.as(?[]const u8);
             } else if (col == 1) {
-                cursor.iterator.filters.bar = arg.as([]const u8);
+                cursor.iterator.filters.bar = arg.as(?[]const u8);
             } else if (col == 2) {
                 _ = arg.as(isize);
             } else {
                 return error.InvalidColumn;
             }
         }
+
+        cursor.iterator.pos = 0;
+        cursor.iterator.seekToMatch();
     }
 
     pub const NextError = error{};
@@ -1213,6 +1321,7 @@ const TestVirtualTableCursor = struct {
         foo: []const u8,
         bar: []const u8,
         baz: isize,
+        nullable_value: ?i64,
     };
 
     pub const ColumnError = error{InvalidColumn};
@@ -1226,6 +1335,7 @@ const TestVirtualTableCursor = struct {
             0 => return Column{ .foo = row.foo },
             1 => return Column{ .bar = row.bar },
             2 => return Column{ .baz = row.baz },
+            3 => return Column{ .nullable_value = null },
             else => return error.InvalidColumn,
         }
     }
@@ -1238,6 +1348,27 @@ const TestVirtualTableCursor = struct {
         return @intCast(cursor.iterator.pos);
     }
 };
+
+var test_lifecycle = struct {
+    create: usize = 0,
+    destroy: usize = 0,
+}{};
+
+test "best index column usage follows SQLite bit positions" {
+    var builder = BestIndexBuilder{
+        .allocator = testing.allocator,
+        .index_info = undefined,
+        .constraints = &.{},
+        .order_by = &.{},
+        .columns_used = (@as(u64, 1) << 0) | (@as(u64, 1) << 63),
+        .id = .{},
+    };
+
+    try testing.expect(builder.isColumnUsed(0));
+    try testing.expect(!builder.isColumnUsed(1));
+    try testing.expect(builder.isColumnUsed(63));
+    try testing.expect(builder.isColumnUsed(64));
+}
 
 test "virtual table" {
     var db = try getTestDb();
@@ -1259,7 +1390,7 @@ test "virtual table" {
     // Filter with both `foo` and `bar`
 
     var stmt = try db.prepareWithDiags(
-        "SELECT rowid, foo, bar, baz FROM vtab_foobar WHERE foo = ?{[]const u8} AND bar = ?{[]const u8} AND baz > ?{usize}",
+        "SELECT rowid, foo, bar, baz, nullable_value FROM vtab_foobar WHERE foo = ?{[]const u8} AND bar = ?{[]const u8} AND baz > ?{usize}",
         .{ .diags = &diags },
     );
     defer stmt.deinit();
@@ -1273,6 +1404,7 @@ test "virtual table" {
             foo: []const u8,
             bar: []const u8,
             baz: usize,
+            nullable_value: ?i64,
         },
         rows_arena.allocator(),
         .{ .diags = &diags },
@@ -1288,7 +1420,24 @@ test "virtual table" {
         try testing.expectEqualStrings("Vincent", row.foo);
         try testing.expectEqualStrings("Michel", row.bar);
         try testing.expect(row.baz > 2);
+        try testing.expectEqual(null, row.nullable_value);
     }
+}
+
+test "virtual table dispatches create and destroy separately" {
+    test_lifecycle = .{};
+
+    var db = try getTestDb();
+    defer db.deinit();
+    var module_context = ModuleContext{ .allocator = testing.allocator };
+    try db.createVirtualTable("lifecycle_vtab", &module_context, TestVirtualTable);
+
+    try db.exec("CREATE VIRTUAL TABLE lifecycle_test USING lifecycle_vtab(n=0)", .{}, .{});
+    try testing.expectEqual(@as(usize, 1), test_lifecycle.create);
+    try testing.expectEqual(@as(usize, 0), test_lifecycle.destroy);
+
+    try db.exec("DROP TABLE lifecycle_test", .{}, .{});
+    try testing.expectEqual(@as(usize, 1), test_lifecycle.destroy);
 }
 
 test "parse module arguments" {
