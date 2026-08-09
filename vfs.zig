@@ -663,7 +663,7 @@ fn shmMap(base: [*c]c.sqlite3_file, page: c_int, page_size: c_int, extend: c_int
         const allocation_granularity: usize = if (builtin.os.tag == .windows) 64 * 1024 else std.heap.pageSize();
         const aligned_offset = map_offset - map_offset % allocation_granularity;
         const data_offset = map_offset - aligned_offset;
-        const mapping_len = std.math.cast(usize, alignSize(len + data_offset, allocation_granularity) orelse return c.SQLITE_IOERR_SHMMAP) orelse return c.SQLITE_IOERR_SHMMAP;
+        const mapping_len = std.math.add(usize, len, data_offset) catch return c.SQLITE_IOERR_SHMMAP;
         const mapping = std.Io.File.MemoryMap.create(node.io, node.file, .{
             .len = mapping_len,
             .offset = aligned_offset,
