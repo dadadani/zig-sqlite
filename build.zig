@@ -118,7 +118,7 @@ fn computeTestTargets(isNative: bool, ci: ?bool) ?[]const TestTarget {
 }
 
 // This creates a SQLite static library from the SQLite dependency code.
-fn makeSQLiteLib(b: *std.Build, suffix_name: []const u8, dep: *std.Build.Dependency, c_flags: []const []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, link_libc: bool, sqlite_c: enum { with, without }) *std.Build.Step.Compile {
+fn makeSQLiteLib(b: *std.Build, suffix_name: []const u8, dep: *std.Build.Dependency, c_flags: []const []const u8, target: std.Build.ResolvedTarget, optimize: ?std.builtin.OptimizeMode, link_libc: bool, sqlite_c: enum { with, without }) *std.Build.Step.Compile {
     const name = switch (sqlite_c) {
         .with => "lib-sqlite-with-sqlite-c",
         .without => "lib-sqlite-without-sqlite-c",
@@ -289,12 +289,14 @@ pub fn build(b: *std.Build) !void {
     //
     // If you want to execute tests for other targets you can pass -fqemu, -fdarling, -fwine, -frosetta.
 
+    const optname = if (optimize != null) @tagName(optimize.?) else "unknown";
+
     for (test_targets, 0..) |test_target, i| {
         const cross_target = getTarget(b.resolveTargetQuery(test_target.query));
         const single_threaded_txt = if (test_target.single_threaded) "single" else "multi";
         const test_name = b.fmt("{s}-{s}-{s}", .{
             try cross_target.result.zigTriple(b.allocator),
-            @tagName(optimize),
+            optname,
             single_threaded_txt,
         });
 
@@ -409,7 +411,7 @@ fn addPreprocessStep(b: *std.Build, sqlite_dep: *std.Build.Dependency) Generated
     };
 }
 
-fn addZigcrypto(b: *std.Build, sqlite_mod: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
+fn addZigcrypto(b: *std.Build, sqlite_mod: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: ?std.builtin.OptimizeMode) *std.Build.Step.Compile {
     const mod = b.addModule("zigcryto", .{
         .root_source_file = b.path("examples/zigcrypto.zig"),
         .target = getTarget(target),
@@ -426,7 +428,7 @@ fn addZigcrypto(b: *std.Build, sqlite_mod: *std.Build.Module, target: std.Build.
     return exe;
 }
 
-fn addZigcryptoTestRun(b: *std.Build, sqlite_mod: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, extension: *std.Build.Step.Compile) *std.Build.Step.Run {
+fn addZigcryptoTestRun(b: *std.Build, sqlite_mod: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: ?std.builtin.OptimizeMode, extension: *std.Build.Step.Compile) *std.Build.Step.Run {
     const mod = b.addModule("zigcryto-test", .{
         .root_source_file = b.path("examples/zigcrypto_test.zig"),
         .target = getTarget(target),
