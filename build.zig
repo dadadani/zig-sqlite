@@ -289,7 +289,7 @@ pub fn build(b: *std.Build) !void {
     //
     // If you want to execute tests for other targets you can pass -fqemu, -fdarling, -fwine, -frosetta.
 
-    const optname = if (optimize != null) @tagName(optimize.?) else "unknown";
+    const optname = @tagName(optimize);
 
     for (test_targets, 0..) |test_target, i| {
         const cross_target = getTarget(b.resolveTargetQuery(test_target.query));
